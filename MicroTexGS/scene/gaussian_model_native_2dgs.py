@@ -114,6 +114,8 @@ class GaussianModel:
         self._rtg_probe_pass_count = torch.empty(0, dtype=torch.int16)
         self._rtg_probe_window_count = torch.empty(0, dtype=torch.int16)
         self._rtg_probe_score_accum = torch.empty(0)
+        self._rtd_shadow_error_accum = torch.empty(0)
+        self._rtd_shadow_denom = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
@@ -150,6 +152,30 @@ class GaussianModel:
         self.texture_rtg_stability_windows = 1
         self.texture_rtg_probe_interval = 0
         self.texture_rtg_required_probe_windows = 0
+        self.texture_rtd_enabled = False
+        self.texture_rtd_compress_from_iter = 70_000
+        self.texture_rtd_compress_until_iter = 100_000
+        self.texture_rtd_compress_interval = 10_000
+        self.texture_rtd_min_resolution = 1
+        self.texture_rtd_step_mode = "halve"
+        self.texture_rtd_error_threshold = 0.035
+        self.texture_rtd_error_threshold_4to3 = -1.0
+        self.texture_rtd_error_threshold_3to2 = -1.0
+        self.texture_rtd_error_threshold_2to1 = -1.0
+        self.texture_rtd_kd_weight = 1.0
+        self.texture_rtd_shadow_weight = 1.0
+        self.texture_rtd_specular_weight = 1.0
+        self.texture_rtd_normal_weight = 0.25
+        self.texture_rtd_max_fraction = 1.0
+        self.texture_rtd_shadow_sample_interval = 1
+        self.texture_rtd_dry_run = False
+        self.texture_rmd_enabled = False
+        self.texture_rmd_start_iter = 110_000
+        self.texture_rmd_end_iter = 120_000
+        self.texture_rmd_weight = 1e-4
+        self.texture_rmd_kd_weight = 1.0
+        self.texture_rmd_specular_weight = 0.5
+        self.texture_rmd_target_resolution = 2
         self.texture_tor_enabled = False
         self.texture_tor_start_iter = 30_000
         self.texture_tor_gate_floor = 0.05
@@ -178,6 +204,8 @@ class GaussianModel:
         self._last_rtg_probe_target_iter = 0
         self._last_rtg_refine_log = {}
         self._last_rtg_probe_log = {}
+        self._last_rtd_compress_target_iter = 0
+        self._last_rtd_compress_log = {}
         self._dynamic_texture_layout_version = 0
         self._dynamic_texture_flat_ids_cache = None
         self.setup_functions()
@@ -229,6 +257,8 @@ class GaussianModel:
                 "rtg_probe_pass_count": self._rtg_probe_pass_count,
                 "rtg_probe_window_count": self._rtg_probe_window_count,
                 "rtg_probe_score_accum": self._rtg_probe_score_accum,
+                "rtd_shadow_error_accum": self._rtd_shadow_error_accum,
+                "rtd_shadow_denom": self._rtd_shadow_denom,
                 "tex_specular": self._tex_specular,
                 "tex_normal": self._tex_normal,
                 "mbrdf_normal_source": self.mbrdf_normal_source,
@@ -243,6 +273,30 @@ class GaussianModel:
                 "texture_rtg_required_probe_windows": self.texture_rtg_required_probe_windows,
                 "texture_rtg_score_margin": self.texture_rtg_score_margin,
                 "texture_rtg_gate_reference_resolution": self.texture_rtg_gate_reference_resolution,
+                "texture_rtd_enabled": self.texture_rtd_enabled,
+                "texture_rtd_compress_from_iter": self.texture_rtd_compress_from_iter,
+                "texture_rtd_compress_until_iter": self.texture_rtd_compress_until_iter,
+                "texture_rtd_compress_interval": self.texture_rtd_compress_interval,
+                "texture_rtd_min_resolution": self.texture_rtd_min_resolution,
+                "texture_rtd_step_mode": self.texture_rtd_step_mode,
+                "texture_rtd_error_threshold": self.texture_rtd_error_threshold,
+                "texture_rtd_error_threshold_4to3": self.texture_rtd_error_threshold_4to3,
+                "texture_rtd_error_threshold_3to2": self.texture_rtd_error_threshold_3to2,
+                "texture_rtd_error_threshold_2to1": self.texture_rtd_error_threshold_2to1,
+                "texture_rtd_kd_weight": self.texture_rtd_kd_weight,
+                "texture_rtd_shadow_weight": self.texture_rtd_shadow_weight,
+                "texture_rtd_specular_weight": self.texture_rtd_specular_weight,
+                "texture_rtd_normal_weight": self.texture_rtd_normal_weight,
+                "texture_rtd_max_fraction": self.texture_rtd_max_fraction,
+                "texture_rtd_shadow_sample_interval": self.texture_rtd_shadow_sample_interval,
+                "texture_rtd_dry_run": self.texture_rtd_dry_run,
+                "texture_rmd_enabled": self.texture_rmd_enabled,
+                "texture_rmd_start_iter": self.texture_rmd_start_iter,
+                "texture_rmd_end_iter": self.texture_rmd_end_iter,
+                "texture_rmd_weight": self.texture_rmd_weight,
+                "texture_rmd_kd_weight": self.texture_rmd_kd_weight,
+                "texture_rmd_specular_weight": self.texture_rmd_specular_weight,
+                "texture_rmd_target_resolution": self.texture_rmd_target_resolution,
                 "texture_tor_enabled": self.texture_tor_enabled,
                 "texture_tor_start_iter": self.texture_tor_start_iter,
                 "texture_tor_gate_floor": self.texture_tor_gate_floor,
@@ -259,6 +313,7 @@ class GaussianModel:
                 "texture_factor_surgery_seed": self.texture_factor_surgery_seed,
                 "last_rtg_refine_target_iter": int(getattr(self, "_last_rtg_refine_target_iter", 0)),
                 "last_rtg_probe_target_iter": int(getattr(self, "_last_rtg_probe_target_iter", 0)),
+                "last_rtd_compress_target_iter": int(getattr(self, "_last_rtd_compress_target_iter", 0)),
             },
         )
 
@@ -266,6 +321,8 @@ class GaussianModel:
         requested_dynamic_textures = bool(self.texture_dynamic_resolution)
         requested_texture_min_resolution = int(self.texture_min_resolution)
         requested_texture_max_resolution = int(self.texture_max_resolution)
+        requested_rtd_enabled = bool(getattr(training_args, "texture_rtd_enabled", False))
+        requested_rmd_enabled = bool(getattr(training_args, "texture_rmd_enabled", False))
         converted_static_textures = False
         if len(model_args) == 12:
             (
@@ -369,6 +426,10 @@ class GaussianModel:
             self._rtg_probe_window_count = rtg_probe_window_count.to(device="cuda", dtype=torch.int16) if isinstance(rtg_probe_window_count, torch.Tensor) else torch.empty(0, device="cuda", dtype=torch.int16)
             rtg_probe_score_accum = extra_state.get("rtg_probe_score_accum", torch.empty(0))
             self._rtg_probe_score_accum = rtg_probe_score_accum.to(device="cuda", dtype=torch.float32) if isinstance(rtg_probe_score_accum, torch.Tensor) else torch.empty(0, device="cuda")
+            rtd_shadow_error_accum = extra_state.get("rtd_shadow_error_accum", torch.empty(0))
+            self._rtd_shadow_error_accum = rtd_shadow_error_accum.to(device="cuda", dtype=torch.float32) if isinstance(rtd_shadow_error_accum, torch.Tensor) else torch.empty(0, device="cuda")
+            rtd_shadow_denom = extra_state.get("rtd_shadow_denom", torch.empty(0))
+            self._rtd_shadow_denom = rtd_shadow_denom.to(device="cuda", dtype=torch.float32) if isinstance(rtd_shadow_denom, torch.Tensor) else torch.empty(0, device="cuda")
             tex_specular = extra_state.get("tex_specular", torch.empty(0))
             self._tex_specular = tex_specular.to(device="cuda", dtype=torch.float32) if isinstance(tex_specular, torch.Tensor) else torch.empty(0, device="cuda")
             tex_normal = extra_state.get("tex_normal", torch.empty(0))
@@ -385,6 +446,56 @@ class GaussianModel:
             self.texture_rtg_required_probe_windows = int(extra_state.get("texture_rtg_required_probe_windows", getattr(self, "texture_rtg_required_probe_windows", 0)))
             self.texture_rtg_score_margin = float(extra_state.get("texture_rtg_score_margin", getattr(self, "texture_rtg_score_margin", 1.0)))
             self.texture_rtg_gate_reference_resolution = float(extra_state.get("texture_rtg_gate_reference_resolution", getattr(self, "texture_rtg_gate_reference_resolution", 4.0)))
+            self.texture_rtd_enabled = bool(extra_state.get("texture_rtd_enabled", getattr(self, "texture_rtd_enabled", False)))
+            self.texture_rtd_compress_from_iter = int(extra_state.get("texture_rtd_compress_from_iter", getattr(self, "texture_rtd_compress_from_iter", 70_000)))
+            self.texture_rtd_compress_until_iter = int(extra_state.get("texture_rtd_compress_until_iter", getattr(self, "texture_rtd_compress_until_iter", 100_000)))
+            self.texture_rtd_compress_interval = int(extra_state.get("texture_rtd_compress_interval", getattr(self, "texture_rtd_compress_interval", 10_000)))
+            self.texture_rtd_min_resolution = int(extra_state.get("texture_rtd_min_resolution", getattr(self, "texture_rtd_min_resolution", 1)))
+            self.texture_rtd_step_mode = str(extra_state.get("texture_rtd_step_mode", getattr(self, "texture_rtd_step_mode", "halve"))).lower()
+            self.texture_rtd_error_threshold = float(extra_state.get("texture_rtd_error_threshold", getattr(self, "texture_rtd_error_threshold", 0.035)))
+            self.texture_rtd_error_threshold_4to3 = float(extra_state.get("texture_rtd_error_threshold_4to3", getattr(self, "texture_rtd_error_threshold_4to3", -1.0)))
+            self.texture_rtd_error_threshold_3to2 = float(extra_state.get("texture_rtd_error_threshold_3to2", getattr(self, "texture_rtd_error_threshold_3to2", -1.0)))
+            self.texture_rtd_error_threshold_2to1 = float(extra_state.get("texture_rtd_error_threshold_2to1", getattr(self, "texture_rtd_error_threshold_2to1", -1.0)))
+            self.texture_rtd_kd_weight = float(extra_state.get("texture_rtd_kd_weight", getattr(self, "texture_rtd_kd_weight", 1.0)))
+            self.texture_rtd_shadow_weight = float(extra_state.get("texture_rtd_shadow_weight", getattr(self, "texture_rtd_shadow_weight", 1.0)))
+            self.texture_rtd_specular_weight = float(extra_state.get("texture_rtd_specular_weight", getattr(self, "texture_rtd_specular_weight", 1.0)))
+            self.texture_rtd_normal_weight = float(extra_state.get("texture_rtd_normal_weight", getattr(self, "texture_rtd_normal_weight", 0.25)))
+            self.texture_rtd_max_fraction = float(extra_state.get("texture_rtd_max_fraction", getattr(self, "texture_rtd_max_fraction", 1.0)))
+            self.texture_rtd_shadow_sample_interval = int(extra_state.get("texture_rtd_shadow_sample_interval", getattr(self, "texture_rtd_shadow_sample_interval", 1)))
+            self.texture_rtd_dry_run = bool(extra_state.get("texture_rtd_dry_run", getattr(self, "texture_rtd_dry_run", False)))
+            self.texture_rmd_enabled = bool(extra_state.get("texture_rmd_enabled", getattr(self, "texture_rmd_enabled", False)))
+            self.texture_rmd_start_iter = int(extra_state.get("texture_rmd_start_iter", getattr(self, "texture_rmd_start_iter", 110_000)))
+            self.texture_rmd_end_iter = int(extra_state.get("texture_rmd_end_iter", getattr(self, "texture_rmd_end_iter", 120_000)))
+            self.texture_rmd_weight = float(extra_state.get("texture_rmd_weight", getattr(self, "texture_rmd_weight", 1e-4)))
+            self.texture_rmd_kd_weight = float(extra_state.get("texture_rmd_kd_weight", getattr(self, "texture_rmd_kd_weight", 1.0)))
+            self.texture_rmd_specular_weight = float(extra_state.get("texture_rmd_specular_weight", getattr(self, "texture_rmd_specular_weight", 0.5)))
+            self.texture_rmd_target_resolution = int(extra_state.get("texture_rmd_target_resolution", getattr(self, "texture_rmd_target_resolution", 2)))
+            if requested_rtd_enabled:
+                self.texture_rtd_enabled = True
+                self.texture_rtd_compress_from_iter = int(getattr(training_args, "texture_rtd_compress_from_iter", self.texture_rtd_compress_from_iter))
+                self.texture_rtd_compress_until_iter = int(getattr(training_args, "texture_rtd_compress_until_iter", self.texture_rtd_compress_until_iter))
+                self.texture_rtd_compress_interval = max(1, int(getattr(training_args, "texture_rtd_compress_interval", self.texture_rtd_compress_interval)))
+                self.texture_rtd_min_resolution = max(1, int(getattr(training_args, "texture_rtd_min_resolution", self.texture_rtd_min_resolution)))
+                self.texture_rtd_step_mode = str(getattr(training_args, "texture_rtd_step_mode", self.texture_rtd_step_mode)).lower()
+                self.texture_rtd_error_threshold = max(0.0, float(getattr(training_args, "texture_rtd_error_threshold", self.texture_rtd_error_threshold)))
+                self.texture_rtd_error_threshold_4to3 = float(getattr(training_args, "texture_rtd_error_threshold_4to3", self.texture_rtd_error_threshold_4to3))
+                self.texture_rtd_error_threshold_3to2 = float(getattr(training_args, "texture_rtd_error_threshold_3to2", self.texture_rtd_error_threshold_3to2))
+                self.texture_rtd_error_threshold_2to1 = float(getattr(training_args, "texture_rtd_error_threshold_2to1", self.texture_rtd_error_threshold_2to1))
+                self.texture_rtd_kd_weight = max(0.0, float(getattr(training_args, "texture_rtd_kd_weight", self.texture_rtd_kd_weight)))
+                self.texture_rtd_shadow_weight = max(0.0, float(getattr(training_args, "texture_rtd_shadow_weight", self.texture_rtd_shadow_weight)))
+                self.texture_rtd_specular_weight = max(0.0, float(getattr(training_args, "texture_rtd_specular_weight", self.texture_rtd_specular_weight)))
+                self.texture_rtd_normal_weight = max(0.0, float(getattr(training_args, "texture_rtd_normal_weight", self.texture_rtd_normal_weight)))
+                self.texture_rtd_max_fraction = min(max(float(getattr(training_args, "texture_rtd_max_fraction", self.texture_rtd_max_fraction)), 0.0), 1.0)
+                self.texture_rtd_shadow_sample_interval = max(1, int(getattr(training_args, "texture_rtd_shadow_sample_interval", self.texture_rtd_shadow_sample_interval)))
+                self.texture_rtd_dry_run = bool(getattr(training_args, "texture_rtd_dry_run", self.texture_rtd_dry_run))
+            if requested_rmd_enabled:
+                self.texture_rmd_enabled = True
+                self.texture_rmd_start_iter = int(getattr(training_args, "texture_rmd_start_iter", self.texture_rmd_start_iter))
+                self.texture_rmd_end_iter = int(getattr(training_args, "texture_rmd_end_iter", self.texture_rmd_end_iter))
+                self.texture_rmd_weight = max(0.0, float(getattr(training_args, "texture_rmd_weight", self.texture_rmd_weight)))
+                self.texture_rmd_kd_weight = max(0.0, float(getattr(training_args, "texture_rmd_kd_weight", self.texture_rmd_kd_weight)))
+                self.texture_rmd_specular_weight = max(0.0, float(getattr(training_args, "texture_rmd_specular_weight", self.texture_rmd_specular_weight)))
+                self.texture_rmd_target_resolution = max(1, int(getattr(training_args, "texture_rmd_target_resolution", self.texture_rmd_target_resolution)))
             self.texture_tor_enabled = bool(extra_state.get("texture_tor_enabled", getattr(self, "texture_tor_enabled", False)))
             self.texture_tor_start_iter = int(extra_state.get("texture_tor_start_iter", getattr(self, "texture_tor_start_iter", 30_000)))
             self.texture_tor_gate_floor = float(extra_state.get("texture_tor_gate_floor", getattr(self, "texture_tor_gate_floor", 0.05)))
@@ -401,6 +512,7 @@ class GaussianModel:
             self.texture_factor_surgery_seed = int(extra_state.get("texture_factor_surgery_seed", getattr(self, "texture_factor_surgery_seed", 0)))
             self._last_rtg_refine_target_iter = int(extra_state.get("last_rtg_refine_target_iter", getattr(self, "_last_rtg_refine_target_iter", 0)))
             self._last_rtg_probe_target_iter = int(extra_state.get("last_rtg_probe_target_iter", getattr(self, "_last_rtg_probe_target_iter", 0)))
+            self._last_rtd_compress_target_iter = int(extra_state.get("last_rtd_compress_target_iter", getattr(self, "_last_rtd_compress_target_iter", 0)))
             if self.use_mbrdf:
                 self._initialize_mbrdf_modules()
                 if asg_state is not None:
@@ -847,6 +959,35 @@ class GaussianModel:
                 "probe_interval": int(getattr(self, "texture_rtg_probe_interval", 0)),
                 "required_probe_windows": int(getattr(self, "texture_rtg_required_probe_windows", 0)),
             },
+            "rtd": {
+                "enabled": bool(getattr(self, "texture_rtd_enabled", False)),
+                "compress_from_iter": int(getattr(self, "texture_rtd_compress_from_iter", 0)),
+                "compress_until_iter": int(getattr(self, "texture_rtd_compress_until_iter", 0)),
+                "compress_interval": int(getattr(self, "texture_rtd_compress_interval", 0)),
+                "min_resolution": int(getattr(self, "texture_rtd_min_resolution", 1)),
+                "step_mode": str(getattr(self, "texture_rtd_step_mode", "halve")),
+                "error_threshold": float(getattr(self, "texture_rtd_error_threshold", 0.0)),
+                "error_threshold_4to3": float(getattr(self, "texture_rtd_error_threshold_4to3", -1.0)),
+                "error_threshold_3to2": float(getattr(self, "texture_rtd_error_threshold_3to2", -1.0)),
+                "error_threshold_2to1": float(getattr(self, "texture_rtd_error_threshold_2to1", -1.0)),
+                "kd_weight": float(getattr(self, "texture_rtd_kd_weight", 0.0)),
+                "shadow_weight": float(getattr(self, "texture_rtd_shadow_weight", 0.0)),
+                "specular_weight": float(getattr(self, "texture_rtd_specular_weight", 0.0)),
+                "normal_weight": float(getattr(self, "texture_rtd_normal_weight", 0.0)),
+                "shadow_stat": "visible_count_average",
+                "max_fraction": float(getattr(self, "texture_rtd_max_fraction", 1.0)),
+                "shadow_sample_interval": int(getattr(self, "texture_rtd_shadow_sample_interval", 1)),
+                "dry_run": bool(getattr(self, "texture_rtd_dry_run", False)),
+            },
+            "rmd": {
+                "enabled": bool(getattr(self, "texture_rmd_enabled", False)),
+                "start_iter": int(getattr(self, "texture_rmd_start_iter", 0)),
+                "end_iter": int(getattr(self, "texture_rmd_end_iter", 0)),
+                "weight": float(getattr(self, "texture_rmd_weight", 0.0)),
+                "kd_weight": float(getattr(self, "texture_rmd_kd_weight", 0.0)),
+                "specular_weight": float(getattr(self, "texture_rmd_specular_weight", 0.0)),
+                "target_resolution": int(getattr(self, "texture_rmd_target_resolution", 0)),
+            },
             "tor": {
                 "enabled": bool(getattr(self, "texture_tor_enabled", False)),
                 "start_iter": int(getattr(self, "texture_tor_start_iter", 30_000)),
@@ -898,6 +1039,8 @@ class GaussianModel:
                 "rtg_probe_pass_count": self._texture_tensor_summary(getattr(self, "_rtg_probe_pass_count", None)),
                 "rtg_probe_window_count": self._texture_tensor_summary(getattr(self, "_rtg_probe_window_count", None)),
                 "rtg_probe_score_accum": self._texture_tensor_summary(getattr(self, "_rtg_probe_score_accum", None)),
+                "rtd_shadow_error_accum": self._texture_tensor_summary(getattr(self, "_rtd_shadow_error_accum", None)),
+                "rtd_shadow_denom": self._texture_tensor_summary(getattr(self, "_rtd_shadow_denom", None)),
             },
             "lr_scales": {
                 "texture_specular_lr_scale": float(getattr(self, "texture_specular_lr_scale", 1.0)),
@@ -906,6 +1049,8 @@ class GaussianModel:
         }
         if getattr(self, "_last_rtg_refine_log", None):
             state["last_rtg_refine_log"] = dict(self._last_rtg_refine_log)
+        if getattr(self, "_last_rtd_compress_log", None):
+            state["last_rtd_compress_log"] = dict(self._last_rtd_compress_log)
         if include_optimizer:
             state["optimizer_groups"] = self._optimizer_group_summary()
         return state
@@ -945,6 +1090,16 @@ class GaussianModel:
             f"probe_required={state['rtg'].get('required_probe_windows', 0)} "
             f"probe_interval={state['rtg'].get('probe_interval', 0)} "
             f"resize={state['rtg']['resize_mode']} dry_run={state['rtg']['dry_run']} | "
+            f"rtd enabled={state['rtd']['enabled']} interval={state['rtd']['compress_interval']} "
+            f"min_res={state['rtd']['min_resolution']} threshold={state['rtd']['error_threshold']:.3e} "
+            f"weights kd/shadow/spec/normal={state['rtd']['kd_weight']:.2f}/"
+            f"{state['rtd']['shadow_weight']:.2f}/{state['rtd']['specular_weight']:.2f}/"
+            f"{state['rtd']['normal_weight']:.2f} shadow_sample={state['rtd'].get('shadow_sample_interval', 1)} "
+            f"dry_run={state['rtd']['dry_run']} | "
+            f"rmd enabled={state['rmd']['enabled']} start={state['rmd']['start_iter']} "
+            f"end={state['rmd']['end_iter']} weight={state['rmd']['weight']:.3e} "
+            f"kd/spec={state['rmd']['kd_weight']:.2f}/{state['rmd']['specular_weight']:.2f} "
+            f"target={state['rmd']['target_resolution']} | "
             f"tor enabled={state['tor']['enabled']} start={state['tor']['start_iter']} "
             f"floor={state['tor']['gate_floor']:.3f} scale={state['tor']['gate_scale']:.2f} "
             f"strength={state['tor']['strength']:.2f} | "
@@ -1248,6 +1403,8 @@ class GaussianModel:
         ensure("_rtg_probe_pass_count", torch.int16)
         ensure("_rtg_probe_window_count", torch.int16)
         ensure("_rtg_probe_score_accum", torch.float32)
+        ensure("_rtd_shadow_error_accum", torch.float32)
+        ensure("_rtd_shadow_denom", torch.float32)
 
     def _refresh_rtg_score_from_window(self):
         self._ensure_rtg_buffers()
@@ -1478,6 +1635,30 @@ class GaussianModel:
         self.texture_rtg_stability_windows = max(1, int(getattr(training_args, "texture_rtg_stability_windows", 1)))
         self.texture_rtg_probe_interval = max(0, int(getattr(training_args, "texture_rtg_probe_interval", 0)))
         self.texture_rtg_required_probe_windows = max(0, int(getattr(training_args, "texture_rtg_required_probe_windows", 0)))
+        self.texture_rtd_enabled = bool(getattr(training_args, "texture_rtd_enabled", False))
+        self.texture_rtd_compress_from_iter = int(getattr(training_args, "texture_rtd_compress_from_iter", 70_000))
+        self.texture_rtd_compress_until_iter = int(getattr(training_args, "texture_rtd_compress_until_iter", 100_000))
+        self.texture_rtd_compress_interval = max(1, int(getattr(training_args, "texture_rtd_compress_interval", 10_000)))
+        self.texture_rtd_min_resolution = max(1, int(getattr(training_args, "texture_rtd_min_resolution", 1)))
+        self.texture_rtd_step_mode = str(getattr(training_args, "texture_rtd_step_mode", "halve")).lower()
+        self.texture_rtd_error_threshold = max(0.0, float(getattr(training_args, "texture_rtd_error_threshold", 0.035)))
+        self.texture_rtd_error_threshold_4to3 = float(getattr(training_args, "texture_rtd_error_threshold_4to3", -1.0))
+        self.texture_rtd_error_threshold_3to2 = float(getattr(training_args, "texture_rtd_error_threshold_3to2", -1.0))
+        self.texture_rtd_error_threshold_2to1 = float(getattr(training_args, "texture_rtd_error_threshold_2to1", -1.0))
+        self.texture_rtd_kd_weight = max(0.0, float(getattr(training_args, "texture_rtd_kd_weight", 1.0)))
+        self.texture_rtd_shadow_weight = max(0.0, float(getattr(training_args, "texture_rtd_shadow_weight", 1.0)))
+        self.texture_rtd_specular_weight = max(0.0, float(getattr(training_args, "texture_rtd_specular_weight", 1.0)))
+        self.texture_rtd_normal_weight = max(0.0, float(getattr(training_args, "texture_rtd_normal_weight", 0.25)))
+        self.texture_rtd_max_fraction = min(max(float(getattr(training_args, "texture_rtd_max_fraction", 1.0)), 0.0), 1.0)
+        self.texture_rtd_shadow_sample_interval = max(1, int(getattr(training_args, "texture_rtd_shadow_sample_interval", 1)))
+        self.texture_rtd_dry_run = bool(getattr(training_args, "texture_rtd_dry_run", False))
+        self.texture_rmd_enabled = bool(getattr(training_args, "texture_rmd_enabled", False))
+        self.texture_rmd_start_iter = int(getattr(training_args, "texture_rmd_start_iter", 110_000))
+        self.texture_rmd_end_iter = int(getattr(training_args, "texture_rmd_end_iter", 120_000))
+        self.texture_rmd_weight = max(0.0, float(getattr(training_args, "texture_rmd_weight", 1e-4)))
+        self.texture_rmd_kd_weight = max(0.0, float(getattr(training_args, "texture_rmd_kd_weight", 1.0)))
+        self.texture_rmd_specular_weight = max(0.0, float(getattr(training_args, "texture_rmd_specular_weight", 0.5)))
+        self.texture_rmd_target_resolution = max(1, int(getattr(training_args, "texture_rmd_target_resolution", 2)))
         self.texture_tor_enabled = bool(getattr(training_args, "texture_tor_enabled", False))
         self.texture_tor_start_iter = int(getattr(training_args, "texture_tor_start_iter", 30_000))
         self.texture_tor_gate_floor = float(getattr(training_args, "texture_tor_gate_floor", 0.05))
@@ -1913,6 +2094,11 @@ class GaussianModel:
                     charts_per_chunk = max(1, max_texels // max(1, max(old_texels, new_texels)))
                     local_old = torch.arange(old_texels, device=old_dims.device, dtype=torch.long)
                     local_new = torch.arange(new_texels, device=old_dims.device, dtype=torch.long)
+                    if target_res < int(res_value):
+                        # Downsampled charts restart Adam moments. Reusing a
+                        # filtered moment from a different parameterization
+                        # biases the compressed representation.
+                        continue
                     for chunk_start in range(0, int(target_idx.numel()), charts_per_chunk):
                         chunk_idx = target_idx[chunk_start:chunk_start + charts_per_chunk]
                         src = old_offsets[chunk_idx, None] + local_old[None, :]
@@ -2072,6 +2258,127 @@ class GaussianModel:
         activated = self._texture_resize_activation(name, values)
         upsampled = self._bilinear_exact_subdivide_grid(activated, target_res)
         return self._texture_resize_inverse_activation(name, upsampled)
+
+    @staticmethod
+    def _rtd_area_project_grid(values, target_res):
+        if values.ndim != 4:
+            raise ValueError("Expected texture grid values with shape [N, H, W, C].")
+        target_res = int(target_res)
+        nchw = values.permute(0, 3, 1, 2).contiguous()
+        low = F.interpolate(nchw, size=(target_res, target_res), mode="area")
+        return low.permute(0, 2, 3, 1).contiguous()
+
+    def _rtd_downsample_texture_grid(self, name, values, target_res):
+        activated = self._texture_resize_activation(name, values)
+        low = self._rtd_area_project_grid(activated, target_res)
+        return self._texture_resize_inverse_activation(name, low).reshape(-1, values.shape[3])
+
+    @staticmethod
+    def _rtd_reconstruct_grid(values, source_res):
+        if values.ndim != 4:
+            raise ValueError("Expected texture grid values with shape [N, H, W, C].")
+        nchw = values.permute(0, 3, 1, 2).contiguous()
+        recon = F.interpolate(nchw, size=(int(source_res), int(source_res)), mode="bilinear", align_corners=True)
+        return recon.permute(0, 2, 3, 1).contiguous()
+
+    def _rtd_score_domain(self, name, raw_values):
+        domain = self._texture_resize_activation(name, raw_values)
+        if name == "tex_specular":
+            return torch.log(domain.clamp_min(1e-6))
+        return domain
+
+    def _rtd_projection_error_grid(self, name, raw_values, target_res, denom_floor=0.03):
+        domain = self._rtd_score_domain(name, raw_values)
+        low = self._rtd_area_project_grid(domain, target_res)
+        recon = self._rtd_reconstruct_grid(low, int(domain.shape[1]))
+        diff = (recon - domain).abs().flatten(start_dim=1).mean(dim=1)
+        scale = domain.abs().flatten(start_dim=1).mean(dim=1).clamp_min(float(denom_floor))
+        return torch.nan_to_num(diff / scale, nan=0.0, posinf=1e6, neginf=0.0)
+
+    def _rmd_high_frequency_loss_for_tensor(self, name, tensor, target_resolution):
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return None
+        if not self.has_dynamic_textures or tensor.shape[0] != self._tex_color.shape[0]:
+            return None
+        dims = self._texture_dims
+        old_resolutions = dims[:, 0].to(torch.long)
+        old_offsets = dims[:, 2].to(torch.long)
+        target_resolution = max(1, int(target_resolution))
+        eligible = old_resolutions > target_resolution
+        if int(eligible.sum().item()) == 0:
+            return None
+
+        total = tensor.new_zeros(())
+        total_weight = tensor.new_zeros(())
+        max_texels = max(1, int(getattr(self, "texture_rtg_chunk_texels", 262_144)))
+        channels = int(tensor.shape[1])
+        for res_value in torch.unique(old_resolutions[eligible]).tolist():
+            res_value = int(res_value)
+            idx = torch.nonzero(torch.logical_and(eligible, old_resolutions == res_value), as_tuple=False).flatten()
+            if idx.numel() == 0:
+                continue
+            target_res = min(target_resolution, res_value - 1)
+            if target_res < 1:
+                continue
+            texels_per_chart = res_value * res_value
+            charts_per_chunk = max(1, max_texels // max(1, texels_per_chart))
+            local = torch.arange(texels_per_chart, device=dims.device, dtype=torch.long)
+            for chunk_start in range(0, int(idx.numel()), charts_per_chunk):
+                chunk_idx = idx[chunk_start:chunk_start + charts_per_chunk]
+                src = old_offsets[chunk_idx, None] + local[None, :]
+                raw = tensor[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, channels)
+                domain = self._rtd_score_domain(name, raw)
+                low = self._rtd_area_project_grid(domain, target_res)
+                recon = self._rtd_reconstruct_grid(low, res_value)
+                residual = (domain - recon).abs().flatten(start_dim=1).mean(dim=1)
+                total = total + residual.sum()
+                total_weight = total_weight + residual.new_tensor(float(residual.numel()))
+        if float(total_weight.detach().item()) <= 0.0:
+            return None
+        return total / total_weight.clamp_min(1.0)
+
+    def texture_rmd_regularization(self, iteration):
+        if not bool(getattr(self, "texture_rmd_enabled", False)):
+            return None
+        iteration = int(iteration)
+        if iteration < int(getattr(self, "texture_rmd_start_iter", 0)):
+            return None
+        end_iter = int(getattr(self, "texture_rmd_end_iter", 0))
+        if end_iter > 0 and iteration > end_iter:
+            return None
+        if not (self.use_textures and self.has_dynamic_textures):
+            return None
+
+        weight = max(0.0, float(getattr(self, "texture_rmd_weight", 0.0)))
+        if weight <= 0.0:
+            return None
+        target_res = max(1, int(getattr(self, "texture_rmd_target_resolution", 2)))
+        components = {}
+        total = self._tex_color.new_zeros(())
+
+        kd_weight = max(0.0, float(getattr(self, "texture_rmd_kd_weight", 1.0)))
+        if kd_weight > 0.0:
+            kd_loss = self._rmd_high_frequency_loss_for_tensor("tex_color", self._tex_color, target_res)
+            if kd_loss is not None:
+                total = total + kd_weight * kd_loss
+                components["kd"] = kd_loss
+
+        spec_weight = max(0.0, float(getattr(self, "texture_rmd_specular_weight", 0.5)))
+        if spec_weight > 0.0 and self.use_mbrdf and isinstance(self._tex_specular, torch.Tensor) and self._tex_specular.numel() > 0:
+            spec_loss = self._rmd_high_frequency_loss_for_tensor("tex_specular", self._tex_specular, target_res)
+            if spec_loss is not None:
+                total = total + spec_weight * spec_loss
+                components["specular"] = spec_loss
+
+        if not components:
+            return None
+        return {
+            "total": total * weight,
+            "raw": total.detach(),
+            "weight": float(weight),
+            "target_resolution": int(target_res),
+            "components": components,
+        }
 
     def _rtg_next_resolutions(self, old_resolutions):
         old_resolutions = old_resolutions.to(torch.long)
@@ -2336,6 +2643,23 @@ class GaussianModel:
         self.texture_rtg_stability_windows = max(1, int(getattr(training_args, "texture_rtg_stability_windows", 1)))
         self.texture_rtg_probe_interval = max(0, int(getattr(training_args, "texture_rtg_probe_interval", 0)))
         self.texture_rtg_required_probe_windows = max(0, int(getattr(training_args, "texture_rtg_required_probe_windows", 0)))
+        self.texture_rtd_enabled = bool(getattr(training_args, "texture_rtd_enabled", False))
+        self.texture_rtd_compress_from_iter = int(getattr(training_args, "texture_rtd_compress_from_iter", 70_000))
+        self.texture_rtd_compress_until_iter = int(getattr(training_args, "texture_rtd_compress_until_iter", 100_000))
+        self.texture_rtd_compress_interval = max(1, int(getattr(training_args, "texture_rtd_compress_interval", 10_000)))
+        self.texture_rtd_min_resolution = max(1, int(getattr(training_args, "texture_rtd_min_resolution", 1)))
+        self.texture_rtd_step_mode = str(getattr(training_args, "texture_rtd_step_mode", "halve")).lower()
+        self.texture_rtd_error_threshold = max(0.0, float(getattr(training_args, "texture_rtd_error_threshold", 0.035)))
+        self.texture_rtd_error_threshold_4to3 = float(getattr(training_args, "texture_rtd_error_threshold_4to3", -1.0))
+        self.texture_rtd_error_threshold_3to2 = float(getattr(training_args, "texture_rtd_error_threshold_3to2", -1.0))
+        self.texture_rtd_error_threshold_2to1 = float(getattr(training_args, "texture_rtd_error_threshold_2to1", -1.0))
+        self.texture_rtd_kd_weight = max(0.0, float(getattr(training_args, "texture_rtd_kd_weight", 1.0)))
+        self.texture_rtd_shadow_weight = max(0.0, float(getattr(training_args, "texture_rtd_shadow_weight", 1.0)))
+        self.texture_rtd_specular_weight = max(0.0, float(getattr(training_args, "texture_rtd_specular_weight", 1.0)))
+        self.texture_rtd_normal_weight = max(0.0, float(getattr(training_args, "texture_rtd_normal_weight", 0.25)))
+        self.texture_rtd_max_fraction = min(max(float(getattr(training_args, "texture_rtd_max_fraction", 1.0)), 0.0), 1.0)
+        self.texture_rtd_shadow_sample_interval = max(1, int(getattr(training_args, "texture_rtd_shadow_sample_interval", 1)))
+        self.texture_rtd_dry_run = bool(getattr(training_args, "texture_rtd_dry_run", False))
         self.texture_tor_enabled = bool(getattr(training_args, "texture_tor_enabled", False))
         self.texture_tor_start_iter = int(getattr(training_args, "texture_tor_start_iter", 30_000))
         self.texture_tor_gate_floor = float(getattr(training_args, "texture_tor_gate_floor", 0.05))
@@ -2485,6 +2809,23 @@ class GaussianModel:
             "texture_rtg_required_probe_windows": self.texture_rtg_required_probe_windows,
             "texture_rtg_score_margin": self.texture_rtg_score_margin,
             "texture_rtg_gate_reference_resolution": self.texture_rtg_gate_reference_resolution,
+            "texture_rtd_enabled": self.texture_rtd_enabled,
+            "texture_rtd_compress_from_iter": self.texture_rtd_compress_from_iter,
+            "texture_rtd_compress_until_iter": self.texture_rtd_compress_until_iter,
+            "texture_rtd_compress_interval": self.texture_rtd_compress_interval,
+            "texture_rtd_min_resolution": self.texture_rtd_min_resolution,
+            "texture_rtd_step_mode": self.texture_rtd_step_mode,
+            "texture_rtd_error_threshold": self.texture_rtd_error_threshold,
+            "texture_rtd_error_threshold_4to3": self.texture_rtd_error_threshold_4to3,
+            "texture_rtd_error_threshold_3to2": self.texture_rtd_error_threshold_3to2,
+            "texture_rtd_error_threshold_2to1": self.texture_rtd_error_threshold_2to1,
+            "texture_rtd_kd_weight": self.texture_rtd_kd_weight,
+            "texture_rtd_shadow_weight": self.texture_rtd_shadow_weight,
+            "texture_rtd_specular_weight": self.texture_rtd_specular_weight,
+            "texture_rtd_normal_weight": self.texture_rtd_normal_weight,
+            "texture_rtd_max_fraction": self.texture_rtd_max_fraction,
+            "texture_rtd_shadow_sample_interval": self.texture_rtd_shadow_sample_interval,
+            "texture_rtd_dry_run": self.texture_rtd_dry_run,
             "texture_tor_enabled": self.texture_tor_enabled,
             "texture_tor_start_iter": self.texture_tor_start_iter,
             "texture_tor_gate_floor": self.texture_tor_gate_floor,
@@ -2501,6 +2842,7 @@ class GaussianModel:
             "texture_factor_surgery_seed": self.texture_factor_surgery_seed,
             "last_rtg_refine_target_iter": int(getattr(self, "_last_rtg_refine_target_iter", 0)),
             "last_rtg_probe_target_iter": int(getattr(self, "_last_rtg_probe_target_iter", 0)),
+            "last_rtd_compress_target_iter": int(getattr(self, "_last_rtd_compress_target_iter", 0)),
         }
         if self.use_textures:
             payload["tex_color"] = self._tex_color.detach().cpu()
@@ -2518,6 +2860,8 @@ class GaussianModel:
             payload["rtg_probe_pass_count"] = self._rtg_probe_pass_count.detach().cpu() if self._rtg_probe_pass_count.numel() > 0 else torch.empty(0, dtype=torch.int16)
             payload["rtg_probe_window_count"] = self._rtg_probe_window_count.detach().cpu() if self._rtg_probe_window_count.numel() > 0 else torch.empty(0, dtype=torch.int16)
             payload["rtg_probe_score_accum"] = self._rtg_probe_score_accum.detach().cpu() if self._rtg_probe_score_accum.numel() > 0 else torch.empty(0)
+            payload["rtd_shadow_error_accum"] = self._rtd_shadow_error_accum.detach().cpu() if self._rtd_shadow_error_accum.numel() > 0 else torch.empty(0)
+            payload["rtd_shadow_denom"] = self._rtd_shadow_denom.detach().cpu() if self._rtd_shadow_denom.numel() > 0 else torch.empty(0)
         if self.use_mbrdf:
             payload.update(
                 {
@@ -2610,6 +2954,8 @@ class GaussianModel:
             self._rtg_score = torch.empty(0, device="cuda")
             self._rtg_grad_accum = torch.empty(0, device="cuda")
             self._rtg_denom = torch.empty(0, device="cuda")
+            self._rtd_shadow_error_accum = torch.empty(0, device="cuda")
+            self._rtd_shadow_denom = torch.empty(0, device="cuda")
             return
 
         if self.use_mbrdf and isinstance(self.kd, torch.Tensor) and self.kd.numel() == num_points * 3:
@@ -2660,6 +3006,30 @@ class GaussianModel:
         self.texture_rtg_required_probe_windows = int(payload.get("texture_rtg_required_probe_windows", getattr(self, "texture_rtg_required_probe_windows", 0)))
         self.texture_rtg_score_margin = float(payload.get("texture_rtg_score_margin", getattr(self, "texture_rtg_score_margin", 1.0)))
         self.texture_rtg_gate_reference_resolution = float(payload.get("texture_rtg_gate_reference_resolution", getattr(self, "texture_rtg_gate_reference_resolution", 4.0)))
+        self.texture_rtd_enabled = bool(payload.get("texture_rtd_enabled", getattr(self, "texture_rtd_enabled", False)))
+        self.texture_rtd_compress_from_iter = int(payload.get("texture_rtd_compress_from_iter", getattr(self, "texture_rtd_compress_from_iter", 70_000)))
+        self.texture_rtd_compress_until_iter = int(payload.get("texture_rtd_compress_until_iter", getattr(self, "texture_rtd_compress_until_iter", 100_000)))
+        self.texture_rtd_compress_interval = int(payload.get("texture_rtd_compress_interval", getattr(self, "texture_rtd_compress_interval", 10_000)))
+        self.texture_rtd_min_resolution = int(payload.get("texture_rtd_min_resolution", getattr(self, "texture_rtd_min_resolution", 1)))
+        self.texture_rtd_step_mode = str(payload.get("texture_rtd_step_mode", getattr(self, "texture_rtd_step_mode", "halve"))).lower()
+        self.texture_rtd_error_threshold = float(payload.get("texture_rtd_error_threshold", getattr(self, "texture_rtd_error_threshold", 0.035)))
+        self.texture_rtd_error_threshold_4to3 = float(payload.get("texture_rtd_error_threshold_4to3", getattr(self, "texture_rtd_error_threshold_4to3", -1.0)))
+        self.texture_rtd_error_threshold_3to2 = float(payload.get("texture_rtd_error_threshold_3to2", getattr(self, "texture_rtd_error_threshold_3to2", -1.0)))
+        self.texture_rtd_error_threshold_2to1 = float(payload.get("texture_rtd_error_threshold_2to1", getattr(self, "texture_rtd_error_threshold_2to1", -1.0)))
+        self.texture_rtd_kd_weight = float(payload.get("texture_rtd_kd_weight", getattr(self, "texture_rtd_kd_weight", 1.0)))
+        self.texture_rtd_shadow_weight = float(payload.get("texture_rtd_shadow_weight", getattr(self, "texture_rtd_shadow_weight", 1.0)))
+        self.texture_rtd_specular_weight = float(payload.get("texture_rtd_specular_weight", getattr(self, "texture_rtd_specular_weight", 1.0)))
+        self.texture_rtd_normal_weight = float(payload.get("texture_rtd_normal_weight", getattr(self, "texture_rtd_normal_weight", 0.25)))
+        self.texture_rtd_max_fraction = float(payload.get("texture_rtd_max_fraction", getattr(self, "texture_rtd_max_fraction", 1.0)))
+        self.texture_rtd_shadow_sample_interval = int(payload.get("texture_rtd_shadow_sample_interval", getattr(self, "texture_rtd_shadow_sample_interval", 1)))
+        self.texture_rtd_dry_run = bool(payload.get("texture_rtd_dry_run", getattr(self, "texture_rtd_dry_run", False)))
+        self.texture_rmd_enabled = bool(payload.get("texture_rmd_enabled", getattr(self, "texture_rmd_enabled", False)))
+        self.texture_rmd_start_iter = int(payload.get("texture_rmd_start_iter", getattr(self, "texture_rmd_start_iter", 110_000)))
+        self.texture_rmd_end_iter = int(payload.get("texture_rmd_end_iter", getattr(self, "texture_rmd_end_iter", 120_000)))
+        self.texture_rmd_weight = float(payload.get("texture_rmd_weight", getattr(self, "texture_rmd_weight", 1e-4)))
+        self.texture_rmd_kd_weight = float(payload.get("texture_rmd_kd_weight", getattr(self, "texture_rmd_kd_weight", 1.0)))
+        self.texture_rmd_specular_weight = float(payload.get("texture_rmd_specular_weight", getattr(self, "texture_rmd_specular_weight", 0.5)))
+        self.texture_rmd_target_resolution = int(payload.get("texture_rmd_target_resolution", getattr(self, "texture_rmd_target_resolution", 2)))
         self.texture_tor_enabled = bool(payload.get("texture_tor_enabled", getattr(self, "texture_tor_enabled", False)))
         self.texture_tor_start_iter = int(payload.get("texture_tor_start_iter", getattr(self, "texture_tor_start_iter", 30_000)))
         self.texture_tor_gate_floor = float(payload.get("texture_tor_gate_floor", getattr(self, "texture_tor_gate_floor", 0.05)))
@@ -2676,6 +3046,7 @@ class GaussianModel:
         self.texture_factor_surgery_seed = int(payload.get("texture_factor_surgery_seed", getattr(self, "texture_factor_surgery_seed", 0)))
         self._last_rtg_refine_target_iter = int(payload.get("last_rtg_refine_target_iter", getattr(self, "_last_rtg_refine_target_iter", 0)))
         self._last_rtg_probe_target_iter = int(payload.get("last_rtg_probe_target_iter", getattr(self, "_last_rtg_probe_target_iter", 0)))
+        self._last_rtd_compress_target_iter = int(payload.get("last_rtd_compress_target_iter", getattr(self, "_last_rtd_compress_target_iter", 0)))
         if self.use_textures:
             if "tex_color" in payload:
                 self._tex_color = nn.Parameter(payload["tex_color"].to(device="cuda", dtype=torch.float).requires_grad_(True))
@@ -2705,6 +3076,10 @@ class GaussianModel:
                 self._rtg_probe_window_count = rtg_probe_window_count.to(device="cuda", dtype=torch.int16) if isinstance(rtg_probe_window_count, torch.Tensor) else torch.empty(0, device="cuda", dtype=torch.int16)
                 rtg_probe_score_accum = payload.get("rtg_probe_score_accum", torch.empty(0))
                 self._rtg_probe_score_accum = rtg_probe_score_accum.to(device="cuda", dtype=torch.float32) if isinstance(rtg_probe_score_accum, torch.Tensor) else torch.empty(0, device="cuda")
+                rtd_shadow_error_accum = payload.get("rtd_shadow_error_accum", torch.empty(0))
+                self._rtd_shadow_error_accum = rtd_shadow_error_accum.to(device="cuda", dtype=torch.float32) if isinstance(rtd_shadow_error_accum, torch.Tensor) else torch.empty(0, device="cuda")
+                rtd_shadow_denom = payload.get("rtd_shadow_denom", torch.empty(0))
+                self._rtd_shadow_denom = rtd_shadow_denom.to(device="cuda", dtype=torch.float32) if isinstance(rtd_shadow_denom, torch.Tensor) else torch.empty(0, device="cuda")
                 self._sanitize_texture_logits_in_place()
             else:
                 self.initialize_texture_state()
@@ -2746,6 +3121,8 @@ class GaussianModel:
             "_rtg_probe_pass_count",
             "_rtg_probe_window_count",
             "_rtg_probe_score_accum",
+            "_rtd_shadow_error_accum",
+            "_rtd_shadow_denom",
         ):
             value = getattr(self, name)
             if value.numel() != expected:
@@ -2760,6 +3137,8 @@ class GaussianModel:
         self._rtg_probe_pass_count = self._rtg_probe_pass_count[valid_points_mask]
         self._rtg_probe_window_count = self._rtg_probe_window_count[valid_points_mask]
         self._rtg_probe_score_accum = self._rtg_probe_score_accum[valid_points_mask]
+        self._rtd_shadow_error_accum = self._rtd_shadow_error_accum[valid_points_mask]
+        self._rtd_shadow_denom = self._rtd_shadow_denom[valid_points_mask]
         self._replace_dynamic_texture_tensors(tex_color, tex_alpha, texture_dims, tex_color_state, tex_alpha_state, tex_specular, tex_specular_state, tex_normal, tex_normal_state)
 
     def _append_rtg_buffer_from_mask(self, name, selected_pts_mask, repeat_count=1):
@@ -2806,6 +3185,8 @@ class GaussianModel:
         self._append_rtg_buffer_from_mask("_rtg_probe_pass_count", selected_pts_mask, repeat_count)
         self._append_rtg_buffer_from_mask("_rtg_probe_window_count", selected_pts_mask, repeat_count)
         self._append_rtg_buffer_from_mask("_rtg_probe_score_accum", selected_pts_mask, repeat_count)
+        self._append_rtg_buffer_from_mask("_rtd_shadow_error_accum", selected_pts_mask, repeat_count)
+        self._append_rtg_buffer_from_mask("_rtd_shadow_denom", selected_pts_mask, repeat_count)
         self._replace_dynamic_texture_tensors(tex_color, tex_alpha, texture_dims, tex_color_state, tex_alpha_state, tex_specular, tex_specular_state, tex_normal, tex_normal_state)
 
     def _resize_dynamic_textures(self, selected_pts_mask, new_resolutions):
@@ -2856,30 +3237,47 @@ class GaussianModel:
             idx = torch.nonzero(torch.logical_and(changed, old_resolutions == res_value), as_tuple=False).flatten()
             if idx.numel() == 0:
                 continue
-            target_res = int(new_resolutions[idx[0]].item())
-            old_texels = int(res_value * res_value)
-            new_texels = int(target_res * target_res)
-            charts_per_chunk = max(1, max_texels // max(1, max(old_texels, new_texels)))
-            local_old = torch.arange(old_texels, device=old_dims.device, dtype=torch.long)
-            local_new = torch.arange(new_texels, device=old_dims.device, dtype=torch.long)
-            for chunk_start in range(0, int(idx.numel()), charts_per_chunk):
-                chunk_idx = idx[chunk_start:chunk_start + charts_per_chunk]
-                src = old_offsets[chunk_idx, None] + local_old[None, :]
-                color_values = self._tex_color.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, color_channels)
-                alpha_values = self._tex_alpha.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, alpha_channels)
-                color_up = self._rtg_upsample_texture_grid("tex_color", color_values, target_res)
-                alpha_up = self._rtg_upsample_texture_grid("tex_alpha", alpha_values, target_res)
-                dst = new_offsets[chunk_idx, None] + local_new[None, :]
-                new_color[dst.reshape(-1)] = color_up
-                new_alpha[dst.reshape(-1)] = alpha_up
-                if new_specular is not None:
-                    specular_values = self._tex_specular.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, specular_channels)
-                    specular_up = self._rtg_upsample_texture_grid("tex_specular", specular_values, target_res)
-                    new_specular[dst.reshape(-1)] = specular_up
-                if new_normal is not None:
-                    normal_values = self._tex_normal.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, normal_channels)
-                    normal_up = self._rtg_upsample_texture_grid("tex_normal", normal_values, target_res)
-                    new_normal[dst.reshape(-1)] = normal_up
+            for target_res_tensor in torch.unique(new_resolutions[idx]).tolist():
+                target_res = int(target_res_tensor)
+                target_idx = idx[new_resolutions[idx] == target_res]
+                if target_idx.numel() == 0:
+                    continue
+                old_texels = int(res_value * res_value)
+                new_texels = int(target_res * target_res)
+                charts_per_chunk = max(1, max_texels // max(1, max(old_texels, new_texels)))
+                local_old = torch.arange(old_texels, device=old_dims.device, dtype=torch.long)
+                local_new = torch.arange(new_texels, device=old_dims.device, dtype=torch.long)
+                downsample = target_res < int(res_value)
+                for chunk_start in range(0, int(target_idx.numel()), charts_per_chunk):
+                    chunk_idx = target_idx[chunk_start:chunk_start + charts_per_chunk]
+                    src = old_offsets[chunk_idx, None] + local_old[None, :]
+                    color_values = self._tex_color.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, color_channels)
+                    alpha_values = self._tex_alpha.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, alpha_channels)
+                    if downsample:
+                        color_resized = self._rtd_downsample_texture_grid("tex_color", color_values, target_res)
+                        alpha_resized = self._rtd_downsample_texture_grid("tex_alpha", alpha_values, target_res)
+                    else:
+                        color_resized = self._rtg_upsample_texture_grid("tex_color", color_values, target_res)
+                        alpha_resized = self._rtg_upsample_texture_grid("tex_alpha", alpha_values, target_res)
+                    dst = new_offsets[chunk_idx, None] + local_new[None, :]
+                    new_color[dst.reshape(-1)] = color_resized
+                    new_alpha[dst.reshape(-1)] = alpha_resized
+                    if new_specular is not None:
+                        specular_values = self._tex_specular.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, specular_channels)
+                        specular_resized = (
+                            self._rtd_downsample_texture_grid("tex_specular", specular_values, target_res)
+                            if downsample
+                            else self._rtg_upsample_texture_grid("tex_specular", specular_values, target_res)
+                        )
+                        new_specular[dst.reshape(-1)] = specular_resized
+                    if new_normal is not None:
+                        normal_values = self._tex_normal.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, normal_channels)
+                        normal_resized = (
+                            self._rtd_downsample_texture_grid("tex_normal", normal_values, target_res)
+                            if downsample
+                            else self._rtg_upsample_texture_grid("tex_normal", normal_values, target_res)
+                        )
+                        new_normal[dst.reshape(-1)] = normal_resized
 
         texture_dims = torch.stack(
             [new_resolutions.to(torch.int32), new_resolutions.to(torch.int32), new_offsets.to(torch.int32)],
@@ -2892,6 +3290,480 @@ class GaussianModel:
         tex_normal_state = self._resize_dynamic_optimizer_state("tex_normal", old_dims, new_resolutions)
         self._replace_dynamic_texture_tensors(new_color, new_alpha, texture_dims, tex_color_state, tex_alpha_state, new_specular, tex_specular_state, new_normal, tex_normal_state)
         return refined
+
+    def texture_rtd_due_target(self, iteration):
+        if not bool(getattr(self, "texture_rtd_enabled", False)):
+            return None
+        rtd_from = int(getattr(self, "texture_rtd_compress_from_iter", 0))
+        rtd_until = int(getattr(self, "texture_rtd_compress_until_iter", 0))
+        interval = max(1, int(getattr(self, "texture_rtd_compress_interval", 1)))
+        iteration = int(iteration)
+        if rtd_until < rtd_from or iteration < rtd_from or iteration > rtd_until:
+            return None
+        if (iteration - rtd_from) % interval != 0:
+            return None
+        last_target = int(getattr(self, "_last_rtd_compress_target_iter", 0))
+        if iteration <= last_target:
+            return None
+        return int(iteration)
+
+    def texture_rtd_shadow_collection_start_iter(self):
+        rtd_from = int(getattr(self, "texture_rtd_compress_from_iter", 0))
+        interval = max(1, int(getattr(self, "texture_rtd_compress_interval", 1)))
+        return max(0, rtd_from - interval)
+
+    def should_sample_texture_rtd_shadow(self, iteration):
+        if not (
+            self.use_textures
+            and self.has_dynamic_textures
+            and bool(getattr(self, "texture_rtd_enabled", False))
+            and float(getattr(self, "texture_rtd_shadow_weight", 1.0)) > 0.0
+        ):
+            return False
+        iteration = int(iteration)
+        rtd_until = int(getattr(self, "texture_rtd_compress_until_iter", 0))
+        if iteration < self.texture_rtd_shadow_collection_start_iter() or iteration > rtd_until:
+            return False
+        if self.texture_rtd_due_target(iteration) is not None:
+            return True
+        sample_interval = max(1, int(getattr(self, "texture_rtd_shadow_sample_interval", 1)))
+        return (iteration - self.texture_rtd_shadow_collection_start_iter()) % sample_interval == 0
+
+    def _mark_texture_rtd_target_done(self, target_iteration):
+        self._last_rtd_compress_target_iter = max(
+            int(getattr(self, "_last_rtd_compress_target_iter", 0)),
+            int(target_iteration),
+        )
+
+    def reset_texture_rtd_scores(self):
+        self._ensure_rtg_buffers()
+        self._rtd_shadow_error_accum.zero_()
+        self._rtd_shadow_denom.zero_()
+
+    def _rtd_step_mode(self):
+        mode = str(getattr(self, "texture_rtd_step_mode", "halve")).strip().lower()
+        if mode in {"step", "decrement", "linear", "one"}:
+            return "step"
+        return "halve"
+
+    def _rtd_next_resolutions(self, old_resolutions):
+        old_resolutions = old_resolutions.to(torch.long)
+        min_res = max(1, int(getattr(self, "texture_rtd_min_resolution", 1)))
+        if self._rtd_step_mode() == "step":
+            lowered = (old_resolutions - 1).clamp_min(min_res)
+        else:
+            lowered = torch.div(old_resolutions, 2, rounding_mode="floor").clamp_min(min_res)
+        lowered = torch.minimum(lowered, old_resolutions - 1)
+        return torch.where(old_resolutions > min_res, lowered, old_resolutions)
+
+    def _rtd_transition_threshold_tensor(self, old_resolutions, target_resolutions):
+        old_resolutions = old_resolutions.to(torch.long)
+        target_resolutions = target_resolutions.to(device=old_resolutions.device, dtype=torch.long)
+        base_threshold = max(0.0, float(getattr(self, "texture_rtd_error_threshold", 0.035)))
+        thresholds = torch.full(
+            old_resolutions.shape,
+            base_threshold,
+            dtype=torch.float32,
+            device=old_resolutions.device,
+        )
+        transition_attrs = (
+            (4, 3, "texture_rtd_error_threshold_4to3"),
+            (3, 2, "texture_rtd_error_threshold_3to2"),
+            (2, 1, "texture_rtd_error_threshold_2to1"),
+        )
+        for old_res, target_res, attr in transition_attrs:
+            value = float(getattr(self, attr, -1.0))
+            if value < 0.0:
+                continue
+            mask = torch.logical_and(old_resolutions == old_res, target_resolutions == target_res)
+            thresholds[mask] = max(0.0, value)
+        return thresholds
+
+    def _rtd_transition_threshold_log(self):
+        base_threshold = max(0.0, float(getattr(self, "texture_rtd_error_threshold", 0.035)))
+        return {
+            "threshold": float(base_threshold),
+            "threshold_4to3": float(getattr(self, "texture_rtd_error_threshold_4to3", -1.0)),
+            "threshold_3to2": float(getattr(self, "texture_rtd_error_threshold_3to2", -1.0)),
+            "threshold_2to1": float(getattr(self, "texture_rtd_error_threshold_2to1", -1.0)),
+            "step_mode": self._rtd_step_mode(),
+        }
+
+    def _rtd_factor_projection_errors(self, name, tensor, target_resolutions, denom_floor=0.03, candidate_mask=None):
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return None
+        if not self.has_dynamic_textures or tensor.shape[0] != self._tex_color.shape[0]:
+            return None
+        dims = self._texture_dims
+        old_resolutions = dims[:, 0].to(torch.long)
+        old_offsets = dims[:, 2].to(torch.long)
+        target_resolutions = target_resolutions.to(device=dims.device, dtype=torch.long)
+        changed = target_resolutions < old_resolutions
+        if candidate_mask is not None:
+            if isinstance(candidate_mask, torch.Tensor) and candidate_mask.numel() == changed.numel():
+                changed = torch.logical_and(changed, candidate_mask.to(device=changed.device, dtype=torch.bool))
+        errors = torch.zeros((old_resolutions.numel(),), dtype=torch.float32, device=tensor.device)
+        if changed.sum() == 0:
+            return errors
+        max_texels = max(1, int(getattr(self, "texture_rtg_chunk_texels", 262_144)))
+        channels = int(tensor.shape[1])
+        for res_value in torch.unique(old_resolutions[changed]).tolist():
+            idx = torch.nonzero(torch.logical_and(changed, old_resolutions == res_value), as_tuple=False).flatten()
+            if idx.numel() == 0:
+                continue
+            for target_res_tensor in torch.unique(target_resolutions[idx]).tolist():
+                target_res = int(target_res_tensor)
+                target_idx = idx[target_resolutions[idx] == target_res]
+                if target_idx.numel() == 0:
+                    continue
+                old_texels = int(res_value * res_value)
+                charts_per_chunk = max(1, max_texels // max(1, old_texels))
+                local = torch.arange(old_texels, device=dims.device, dtype=torch.long)
+                for chunk_start in range(0, int(target_idx.numel()), charts_per_chunk):
+                    chunk_idx = target_idx[chunk_start:chunk_start + charts_per_chunk]
+                    src = old_offsets[chunk_idx, None] + local[None, :]
+                    values = tensor.detach()[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value, channels)
+                    errors[chunk_idx] = self._rtd_projection_error_grid(
+                        name,
+                        values,
+                        target_res,
+                        denom_floor=denom_floor,
+                    )
+        return errors
+
+    def _rtd_shadow_projection_errors_fast(self, per_uv_shadow, per_point_shadow, target_resolutions, candidate_mask, denom_floor=0.02):
+        if not isinstance(per_uv_shadow, torch.Tensor) or per_uv_shadow.numel() == 0:
+            return None
+        if not isinstance(per_point_shadow, torch.Tensor) or per_point_shadow.numel() == 0:
+            return None
+        if not self.has_dynamic_textures:
+            return None
+
+        dims = self._texture_dims
+        old_resolutions = dims[:, 0].to(torch.long)
+        old_offsets = dims[:, 2].to(torch.long)
+        target_resolutions = target_resolutions.to(device=dims.device, dtype=torch.long)
+        changed = target_resolutions < old_resolutions
+        if isinstance(candidate_mask, torch.Tensor) and candidate_mask.numel() == changed.numel():
+            changed = torch.logical_and(changed, candidate_mask.to(device=changed.device, dtype=torch.bool))
+
+        changed_idx = torch.nonzero(changed, as_tuple=False).flatten()
+        if changed_idx.numel() == 0:
+            return torch.zeros((old_resolutions.numel(),), dtype=torch.float32, device=per_uv_shadow.device)
+
+        flat_shadow = per_uv_shadow.reshape(-1).detach()
+        point_shadow = per_point_shadow.reshape(-1).detach()
+        max_texels = max(1, int(getattr(self, "texture_rtg_chunk_texels", 262_144)))
+        errors = torch.zeros((old_resolutions.numel(),), dtype=torch.float32, device=per_uv_shadow.device)
+
+        for res_value_tensor in torch.unique(old_resolutions[changed_idx]).tolist():
+            res_value = int(res_value_tensor)
+            idx = changed_idx[old_resolutions[changed_idx] == res_value]
+            if idx.numel() == 0:
+                continue
+            old_texels = int(res_value * res_value)
+            charts_per_chunk = max(1, max_texels // max(1, old_texels))
+            local = torch.arange(old_texels, device=dims.device, dtype=torch.long)
+            for target_res_tensor in torch.unique(target_resolutions[idx]).tolist():
+                target_res = int(target_res_tensor)
+                target_idx = idx[target_resolutions[idx] == target_res]
+                if target_idx.numel() == 0:
+                    continue
+                block = res_value // max(1, target_res)
+                use_block_path = target_res > 0 and res_value == target_res * block
+                for chunk_start in range(0, int(target_idx.numel()), charts_per_chunk):
+                    chunk_idx = target_idx[chunk_start:chunk_start + charts_per_chunk]
+                    src = old_offsets[chunk_idx, None] + local[None, :]
+                    values = flat_shadow[src.reshape(-1)].view(chunk_idx.numel(), res_value, res_value)
+                    residual = values - point_shadow[chunk_idx].view(-1, 1, 1)
+                    if use_block_path:
+                        low = residual.view(chunk_idx.numel(), target_res, block, target_res, block).mean(dim=(2, 4))
+                        recon = low.repeat_interleave(block, dim=1).repeat_interleave(block, dim=2)
+                        diff = (recon - residual).abs().flatten(start_dim=1).mean(dim=1)
+                        scale = residual.abs().flatten(start_dim=1).mean(dim=1).clamp_min(float(denom_floor))
+                        chunk_error = torch.nan_to_num(diff / scale, nan=0.0, posinf=1e6, neginf=0.0)
+                    else:
+                        chunk_error = self._rtd_projection_error_grid(
+                            "shadow_residual",
+                            residual.unsqueeze(-1),
+                            target_res,
+                            denom_floor=denom_floor,
+                        )
+                    errors[chunk_idx] = chunk_error
+        return errors
+
+    def _rtd_score_components(self, target_resolutions):
+        n_points = int(self.get_xyz.shape[0])
+        score = torch.zeros((n_points,), dtype=torch.float32, device=self.get_xyz.device)
+        components = {}
+
+        def add_component(label, weight, values):
+            nonlocal score
+            weight = max(0.0, float(weight))
+            if weight <= 0.0 or values is None:
+                return
+            weighted = values.to(device=score.device, dtype=torch.float32) * weight
+            score = torch.maximum(score, weighted)
+            components[label] = weighted
+
+        add_component(
+            "kd",
+            getattr(self, "texture_rtd_kd_weight", 1.0),
+            self._rtd_factor_projection_errors("tex_color", self._tex_color, target_resolutions, denom_floor=0.03),
+        )
+        if self.use_mbrdf and isinstance(self._tex_specular, torch.Tensor) and self._tex_specular.numel() > 0:
+            add_component(
+                "specular",
+                getattr(self, "texture_rtd_specular_weight", 1.0),
+                self._rtd_factor_projection_errors("tex_specular", self._tex_specular, target_resolutions, denom_floor=0.02),
+            )
+        if self.use_mbrdf and isinstance(self._tex_normal, torch.Tensor) and self._tex_normal.numel() > 0:
+            add_component(
+                "normal",
+                getattr(self, "texture_rtd_normal_weight", 0.25),
+                self._rtd_factor_projection_errors("tex_normal", self._tex_normal, target_resolutions, denom_floor=0.05),
+            )
+
+        components["shadow"] = torch.zeros_like(score)
+        shadow_seen = self._rtd_shadow_denom > 0
+        if shadow_seen.any():
+            shadow_error = torch.zeros_like(score)
+            shadow_error[shadow_seen] = (
+                self._rtd_shadow_error_accum[shadow_seen]
+                / self._rtd_shadow_denom[shadow_seen].clamp_min(1.0)
+            )
+            add_component(
+                "shadow",
+                getattr(self, "texture_rtd_shadow_weight", 1.0),
+                shadow_error,
+            )
+        score_seen = shadow_seen
+        if float(getattr(self, "texture_rtd_shadow_weight", 1.0)) <= 0.0:
+            score_seen = torch.ones_like(score, dtype=torch.bool)
+        return score, components, score_seen
+
+    def accumulate_texture_rtd_scores(self, shadow_pkg=None, iteration=None, visibility_filter=None):
+        self.accumulate_texture_rtd_shadow(
+            shadow_pkg,
+            iteration=iteration,
+            visibility_filter=visibility_filter,
+        )
+
+    def accumulate_texture_rtd_shadow(self, shadow_pkg, iteration=None, visibility_filter=None):
+        if not (self.use_textures and bool(getattr(self, "texture_rtd_enabled", False))):
+            return
+        if not self.has_dynamic_textures:
+            return
+        if iteration is not None and int(iteration) < self.texture_rtd_shadow_collection_start_iter():
+            self.reset_texture_rtd_scores()
+            return
+        if iteration is not None and not self.should_sample_texture_rtd_shadow(iteration):
+            return
+        self._ensure_rtg_buffers()
+        dims = self._texture_dims
+        old_resolutions = dims[:, 0].to(torch.long)
+        target_resolutions = self._rtd_next_resolutions(old_resolutions)
+        eligible = target_resolutions < old_resolutions
+        if visibility_filter is not None and isinstance(visibility_filter, torch.Tensor) and visibility_filter.numel() == eligible.numel():
+            eligible = torch.logical_and(eligible, visibility_filter.to(device=eligible.device, dtype=torch.bool))
+        if eligible.sum() == 0:
+            return
+        if shadow_pkg is None:
+            return
+        per_uv_shadow = shadow_pkg.get("per_uv_shadow_rtd")
+        if per_uv_shadow is None:
+            per_uv_shadow = shadow_pkg.get("per_uv_shadow")
+        per_point_shadow = shadow_pkg.get("per_point_shadow")
+        if not (isinstance(per_uv_shadow, torch.Tensor) and isinstance(per_point_shadow, torch.Tensor)):
+            return
+        if per_uv_shadow.reshape(-1).shape[0] != int(self._tex_color.shape[0]):
+            return
+        shadow_result = self._rtd_shadow_projection_errors_fast(
+            per_uv_shadow,
+            per_point_shadow,
+            target_resolutions,
+            eligible,
+            denom_floor=0.02,
+        )
+        if shadow_result is None:
+            return
+        shadow_error = shadow_result
+        if shadow_error.numel() != eligible.numel():
+            return
+        self._rtd_shadow_error_accum[eligible] += shadow_error[eligible].detach()
+        self._rtd_shadow_denom[eligible] += 1.0
+
+    def compress_textures_by_rtd(self, iteration):
+        self._last_rtd_compress_log = {}
+        target_iteration = self.texture_rtd_due_target(iteration)
+        if target_iteration is None:
+            return 0
+        flags = {
+            "use_textures": bool(self.use_textures),
+            "dynamic": bool(self.texture_dynamic_resolution),
+            "rtd_enabled": bool(self.texture_rtd_enabled),
+            "has_dynamic": bool(self.has_dynamic_textures),
+        }
+        if not all(flags.values()):
+            self._last_rtd_compress_log = {
+                "iteration": int(iteration),
+                "target_iteration": int(target_iteration),
+                "skipped": True,
+                "reason": "disabled_flags:" + ",".join(k for k, v in flags.items() if not v),
+            }
+            self._mark_texture_rtd_target_done(target_iteration)
+            self.reset_texture_rtd_scores()
+            return 0
+        self._ensure_rtg_buffers()
+        old_resolutions = self._texture_dims[:, 0].to(torch.long)
+        next_resolutions = self._rtd_next_resolutions(old_resolutions)
+        eligible = next_resolutions < old_resolutions
+        num_eligible = int(eligible.sum().item())
+        if num_eligible == 0:
+            self._last_rtd_compress_log = {
+                "iteration": int(iteration),
+                "target_iteration": int(target_iteration),
+                "skipped": True,
+                "reason": "no_eligible",
+                "eligible_count": 0,
+                "candidate_count": 0,
+            }
+            self._mark_texture_rtd_target_done(target_iteration)
+            self.reset_texture_rtd_scores()
+            return 0
+
+        score, components, score_seen = self._rtd_score_components(next_resolutions)
+        threshold_tensor = self._rtd_transition_threshold_tensor(old_resolutions, next_resolutions)
+        valid = torch.logical_and(torch.logical_and(eligible, score_seen), score <= threshold_tensor)
+        candidate_count = int(valid.sum().item())
+        fraction = min(max(float(getattr(self, "texture_rtd_max_fraction", 1.0)), 0.0), 1.0)
+        budget_count = max(1, int(np.ceil(num_eligible * fraction))) if 0.0 < fraction < 1.0 else candidate_count
+        eligible_seen = torch.logical_and(eligible, score_seen)
+        eligible_scores = score[eligible_seen].detach()
+        base_log = {
+            "iteration": int(iteration),
+            "target_iteration": int(target_iteration),
+            "eligible_count": int(num_eligible),
+            "candidate_count": int(candidate_count),
+            "budget_count": int(budget_count),
+            "cap_fraction": float(fraction),
+            "score_seen_count": int(torch.logical_and(eligible, score_seen).sum().item()),
+            "shadow_seen_count": int(torch.logical_and(eligible, self._rtd_shadow_denom > 0).sum().item()),
+            "dry_run": bool(getattr(self, "texture_rtd_dry_run", False)),
+        }
+        base_log.update(self._rtd_transition_threshold_log())
+        base_log.update(self._rtg_distribution_stats(eligible_scores, "score"))
+        for name, values in components.items():
+            base_log.update(self._rtg_distribution_stats(values[eligible_seen].detach(), f"{name}_score"))
+        if candidate_count == 0:
+            self._last_rtd_compress_log = dict(base_log, **{
+                "skipped": True,
+                "reason": "no_candidates",
+            })
+            self._mark_texture_rtd_target_done(target_iteration)
+            self.reset_texture_rtd_scores()
+            return 0
+
+        valid_idx = torch.nonzero(valid, as_tuple=False).flatten()
+        if 0.0 < fraction < 1.0:
+            k = min(candidate_count, budget_count)
+            selected_values, selected_order = torch.topk(score[valid_idx], k=min(k, valid_idx.numel()), largest=False)
+            selected_idx = valid_idx[selected_order]
+        else:
+            selected_values = score[valid_idx]
+            selected_idx = valid_idx
+        selected = torch.zeros_like(valid)
+        selected[selected_idx] = True
+        new_resolutions = old_resolutions.clone()
+        new_resolutions[selected] = next_resolutions[selected]
+        selected = torch.logical_and(selected, new_resolutions < old_resolutions)
+        if selected.sum() == 0:
+            self._last_rtd_compress_log = dict(base_log, **{
+                "skipped": True,
+                "reason": "empty_selection_after_resize",
+            })
+            self._mark_texture_rtd_target_done(target_iteration)
+            self.reset_texture_rtd_scores()
+            return 0
+
+        before_stats = self._dynamic_texture_stats()
+        selected_scores = score[selected].detach()
+        if bool(getattr(self, "texture_rtd_dry_run", False)):
+            self._last_rtd_compress_log = dict(base_log, **{
+                "skipped": True,
+                "reason": "dry_run",
+                "compressed": int(selected.sum().item()),
+                "before_texels": int(before_stats["total_texels"]),
+                "after_texels": int(before_stats["total_texels"]),
+                "texel_delta": 0,
+                "avg_texels": float(before_stats["avg_texels"]),
+                "hist": before_stats["hist"],
+            })
+            self._last_rtd_compress_log.update(self._rtg_distribution_stats(selected_scores, "selected_score"))
+            self._mark_texture_rtd_target_done(target_iteration)
+            self.reset_texture_rtd_scores()
+            return 0
+
+        compressed = self._resize_dynamic_textures(selected, new_resolutions)
+        after_stats = self._dynamic_texture_stats()
+        self._last_rtd_compress_log = dict(base_log, **{
+            "compressed": int(compressed),
+            "before_texels": int(before_stats["total_texels"]),
+            "after_texels": int(after_stats["total_texels"]),
+            "texel_delta": int(after_stats["total_texels"] - before_stats["total_texels"]),
+            "avg_texels": float(after_stats["avg_texels"]),
+            "hist": after_stats["hist"],
+        })
+        self._last_rtd_compress_log.update(self._rtg_distribution_stats(selected_scores, "selected_score"))
+        self._mark_texture_rtd_target_done(target_iteration)
+        self.reset_texture_rtd_scores()
+        return int(compressed)
+
+    def texture_rtd_log_string(self):
+        log = getattr(self, "_last_rtd_compress_log", None)
+        if not log:
+            return ""
+        threshold_text = (
+            f"mode {log.get('step_mode', 'halve')}, "
+            f"threshold base/4to3/3to2/2to1 "
+            f"{log.get('threshold', 0.0):.3e}/"
+            f"{log.get('threshold_4to3', -1.0):.3e}/"
+            f"{log.get('threshold_3to2', -1.0):.3e}/"
+            f"{log.get('threshold_2to1', -1.0):.3e}"
+        )
+        target_text = ""
+        if "target_iteration" in log and int(log.get("target_iteration", log.get("iteration", 0))) != int(log.get("iteration", 0)):
+            target_text = f"target {int(log.get('target_iteration'))}, "
+        if log.get("skipped", False):
+            return (
+                f"{target_text}skipped {log.get('reason', 'unknown')}, "
+                f"{threshold_text}, "
+                f"score mean/p50/p90/p95/p99/max "
+                f"{log.get('score_mean', 0.0):.3e}/{log.get('score_p50', 0.0):.3e}/"
+                f"{log.get('score_p90', 0.0):.3e}/{log.get('score_p95', 0.0):.3e}/"
+                f"{log.get('score_p99', 0.0):.3e}/{log.get('score_max', 0.0):.3e}, "
+                f"candidates {log.get('candidate_count', 0)}/{log.get('eligible_count', 0)}, "
+                f"score_seen {log.get('score_seen_count', 0)}, "
+                f"shadow_seen {log.get('shadow_seen_count', 0)}, "
+                f"cap {log.get('budget_count', 0)}, dry_run={log.get('dry_run', False)}"
+            )
+        hist = ", ".join(f"{res}x{res}:{count}" for res, count in log.get("hist", []))
+        return (
+            f"{target_text}texels {log['before_texels']}->{log['after_texels']} "
+            f"({log['texel_delta']}), avg {log['avg_texels']:.1f}/G, "
+            f"{threshold_text}, "
+            f"score mean/p50/p90/p95/p99/max "
+            f"{log.get('score_mean', 0.0):.3e}/{log.get('score_p50', 0.0):.3e}/"
+            f"{log.get('score_p90', 0.0):.3e}/{log.get('score_p95', 0.0):.3e}/"
+            f"{log.get('score_p99', 0.0):.3e}/{log.get('score_max', 0.0):.3e}, "
+            f"selected mean/p50/p90/p95/p99/max "
+            f"{log.get('selected_score_mean', 0.0):.3e}/{log.get('selected_score_p50', 0.0):.3e}/"
+            f"{log.get('selected_score_p90', 0.0):.3e}/{log.get('selected_score_p95', 0.0):.3e}/"
+            f"{log.get('selected_score_p99', 0.0):.3e}/{log.get('selected_score_max', 0.0):.3e}, "
+            f"candidates {log.get('candidate_count', 0)}/{log.get('eligible_count', 0)}, "
+            f"score_seen {log.get('score_seen_count', 0)}, "
+            f"shadow_seen {log.get('shadow_seen_count', 0)}, hist [{hist}]"
+        )
 
     def reset_texture_rtg_scores(self):
         self._ensure_rtg_buffers()

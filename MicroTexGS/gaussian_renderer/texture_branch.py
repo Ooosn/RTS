@@ -104,6 +104,18 @@ def _sum_dynamic_texture_values(flat_values, texture_dims):
     return out.reshape(texture_dims.shape[0], *flat_values.shape[1:])
 
 
+def _sum_dynamic_texture_values_from_ids(flat_values, texture_dims, counts, texel_ids, flat_ids, contiguous_flat=False):
+    if texture_dims.numel() == 0:
+        return flat_values
+    values = flat_values.reshape(flat_values.shape[0], -1)
+    out = torch.zeros((texture_dims.shape[0], values.shape[1]), dtype=values.dtype, device=values.device)
+    if contiguous_flat:
+        out.index_add_(0, texel_ids, values)
+    else:
+        out.index_add_(0, texel_ids, values[flat_ids])
+    return out.reshape(texture_dims.shape[0], *flat_values.shape[1:])
+
+
 def _mean_dynamic_texture_values_from_ids(flat_values, texture_dims, counts, texel_ids, flat_ids, contiguous_flat=False):
     if texture_dims.numel() == 0:
         return flat_values
@@ -201,6 +213,23 @@ def _cached_mean_dynamic_texture_values(gau, flat_values, texture_dims):
         expected_total_texels=flat_values.shape[0],
     )
     return _mean_dynamic_texture_values_from_ids(
+        flat_values,
+        texture_dims,
+        counts,
+        texel_ids,
+        flat_ids,
+        contiguous_flat=contiguous_flat,
+    )
+
+
+def _cached_sum_dynamic_texture_values(gau, flat_values, texture_dims):
+    (counts, texel_ids, flat_ids, _), contiguous_flat = _cached_dynamic_texture_flat_ids_with_layout(
+        gau,
+        texture_dims,
+        flat_values.device,
+        expected_total_texels=flat_values.shape[0],
+    )
+    return _sum_dynamic_texture_values_from_ids(
         flat_values,
         texture_dims,
         counts,
@@ -312,11 +341,12 @@ def _fill_shadow_holes_local(maps, hit_weights):
     return torch.where(fill_mask, neighbor_value, maps)
 
 
-def _spatial_shadow_to_static(out_trans, non_trans, shadow_dims, base_resolution, gau):
+def _spatial_shadow_to_static(out_trans, non_trans, shadow_dims, base_resolution, gau, return_raw=False):
     device = out_trans.device
     num_points = int(shadow_dims.shape[0])
     out_shadow = torch.empty((num_points, base_resolution, base_resolution), dtype=out_trans.dtype, device=device)
     out_conf = torch.empty_like(out_shadow)
+    out_raw_shadow = torch.empty_like(out_shadow) if return_raw else None
 
     mode = str(getattr(gau, "texture_shadow_hole_fill", "none")).lower()
     if mode not in {"none", "local", "nearest"}:
@@ -335,21 +365,55 @@ def _spatial_shadow_to_static(out_trans, non_trans, shadow_dims, base_resolution
         trans_maps = out_trans[flat_ids].reshape(-1, 1, resolution, resolution)
         weight_maps = non_trans[flat_ids].reshape(-1, 1, resolution, resolution)
         shadow_maps = trans_maps / torch.clamp_min(weight_maps, 1e-6)
+        raw_shadow_maps = shadow_maps
         if mode == "local":
             shadow_maps = _fill_shadow_holes_local(shadow_maps, weight_maps)
         elif mode == "nearest":
             shadow_maps = _fill_shadow_holes_nearest(shadow_maps, weight_maps, chunk_size)
         if resolution != base_resolution:
+            if return_raw:
+                raw_shadow_maps = F.interpolate(raw_shadow_maps, size=(base_resolution, base_resolution), mode="area")
             shadow_maps = F.interpolate(shadow_maps, size=(base_resolution, base_resolution), mode="area")
             weight_maps = F.interpolate(weight_maps, size=(base_resolution, base_resolution), mode="area")
         out_shadow[point_ids] = shadow_maps[:, 0]
+        if return_raw:
+            out_raw_shadow[point_ids] = raw_shadow_maps[:, 0]
         mean_weight = torch.clamp_min(weight_maps.flatten(1).mean(dim=1, keepdim=True), 1e-6)
         out_conf[point_ids] = torch.clamp(
             weight_maps[:, 0] / mean_weight.reshape(-1, 1, 1),
             0.0,
             1.0,
         )
+    if return_raw:
+        return out_shadow, out_conf, out_raw_shadow
     return out_shadow, out_conf
+
+
+def _static_shadow_to_dynamic_flat(static_maps, texture_dims):
+    if texture_dims.numel() == 0:
+        return static_maps.reshape(-1)
+    device = static_maps.device
+    dtype = static_maps.dtype
+    num_points = int(texture_dims.shape[0])
+    total_texels = int((texture_dims[:, 0].to(torch.long) * texture_dims[:, 1].to(torch.long)).sum().item())
+    out = torch.empty((total_texels,), dtype=dtype, device=device)
+    widths = texture_dims[:, 0].to(torch.long)
+    heights = texture_dims[:, 1].to(torch.long)
+    offsets = texture_dims[:, 2].to(torch.long)
+    base_h = int(static_maps.shape[-2])
+    base_w = int(static_maps.shape[-1])
+    for wh in torch.unique(torch.stack([widths, heights], dim=1), dim=0):
+        width = int(wh[0].item())
+        height = int(wh[1].item())
+        mask = (widths == wh[0]) & (heights == wh[1])
+        point_ids = torch.nonzero(mask, as_tuple=False).squeeze(1)
+        maps = static_maps[point_ids].reshape(-1, 1, base_h, base_w)
+        if height != base_h or width != base_w:
+            maps = F.interpolate(maps, size=(height, width), mode="area")
+        local = torch.arange(height * width, dtype=torch.long, device=device)
+        flat_ids = offsets[point_ids, None] + local[None, :]
+        out[flat_ids.reshape(-1)] = maps[:, 0].reshape(-1)
+    return out
 
 
 _TEXTURE_EFFECT_DEFAULT = "uvshadow_specular_lobe"
@@ -623,8 +687,6 @@ def _compute_texture_shadow_pass(viewpoint_camera, gau, pipe, bg_color, scaling_
     dynamic_textures = bool(getattr(gau, "has_dynamic_textures", False))
     use_per_uv_shadow = bool(per_uv)
     spatial_shadow = use_per_uv_shadow and _texture_shadow_spatial_enabled(gau)
-    if spatial_shadow and dynamic_textures:
-        raise RuntimeError("texture_shadow_spatial_resolution currently supports static MicroTexGS textures only.")
     texture_dims = (
         _build_spatial_shadow_dims(gau)
         if spatial_shadow
@@ -695,38 +757,67 @@ def _compute_texture_shadow_pass(viewpoint_camera, gau, pipe, bg_color, scaling_
     shadow_output_uv = bool(getattr(pipe, "texture_shadow_output_uv", True))
     if spatial_shadow and shadow_output_uv:
         tex_res = int(getattr(gau, "texture_resolution", 1))
-        per_uv_shadow, per_uv_confidence = _spatial_shadow_to_static(
+        need_unfilled_shadow_for_rtd = (
+            dynamic_textures
+            and bool(getattr(gau, "texture_rtd_enabled", False))
+            and bool(getattr(gau, "_texture_rtd_collect_shadow_now", False))
+            and str(getattr(gau, "texture_shadow_hole_fill", "none")).lower() != "none"
+        )
+        shadow_static_result = _spatial_shadow_to_static(
             out_trans.reshape(-1),
             non_trans.reshape(-1),
             texture_dims,
             tex_res,
             gau,
+            return_raw=need_unfilled_shadow_for_rtd,
         )
-        point_out = _sum_dynamic_texture_values(out_trans.reshape(-1), texture_dims)
-        point_non = _sum_dynamic_texture_values(non_trans.reshape(-1), texture_dims)
+        if need_unfilled_shadow_for_rtd:
+            per_uv_shadow_static, per_uv_confidence_static, per_uv_shadow_static_rtd = shadow_static_result
+        else:
+            per_uv_shadow_static, per_uv_confidence_static = shadow_static_result
+            per_uv_shadow_static_rtd = per_uv_shadow_static
+        point_out = _cached_sum_dynamic_texture_values(gau, out_trans.reshape(-1), texture_dims)
+        point_non = _cached_sum_dynamic_texture_values(gau, non_trans.reshape(-1), texture_dims)
         per_point_shadow = (point_out / torch.clamp_min(point_non, 1e-6)).unsqueeze(-1)
+        if dynamic_textures:
+            per_uv_shadow = _static_shadow_to_dynamic_flat(per_uv_shadow_static, gau.get_texture_dims)
+            per_uv_shadow_rtd = _static_shadow_to_dynamic_flat(per_uv_shadow_static_rtd, gau.get_texture_dims)
+            per_uv_confidence = _static_shadow_to_dynamic_flat(per_uv_confidence_static, gau.get_texture_dims)
+        else:
+            per_uv_shadow = per_uv_shadow_static
+            per_uv_shadow_rtd = per_uv_shadow_static_rtd
+            per_uv_confidence = per_uv_confidence_static
     elif not use_per_uv_shadow or not shadow_output_uv:
         per_point_shadow = (out_trans / non_trans_safe).unsqueeze(-1)
         if bool(getattr(gau, "has_dynamic_textures", False)):
             dims = gau.get_texture_dims
             counts = (dims[:, 0].to(torch.long) * dims[:, 1].to(torch.long)).clamp_min(1)
             per_uv_shadow = torch.repeat_interleave(per_point_shadow.reshape(-1), counts)
+            per_uv_shadow_rtd = per_uv_shadow
             per_uv_confidence = torch.ones_like(per_uv_shadow)
         else:
             tex_res = int(getattr(gau, "texture_resolution", 1))
             per_uv_shadow = per_point_shadow.reshape(means3d.shape[0], 1, 1).expand(means3d.shape[0], tex_res, tex_res)
+            per_uv_shadow_rtd = per_uv_shadow
             per_uv_confidence = torch.ones_like(per_uv_shadow)
     elif texture_dims.numel() > 0:
         per_uv_shadow = (out_trans / non_trans_safe).reshape(-1)
-        point_out = _sum_dynamic_texture_values(out_trans.reshape(-1), texture_dims)
-        point_non = _sum_dynamic_texture_values(non_trans.reshape(-1), texture_dims)
+        per_uv_shadow_rtd = per_uv_shadow
+        point_out = _cached_sum_dynamic_texture_values(gau, out_trans.reshape(-1), texture_dims)
+        point_non = _cached_sum_dynamic_texture_values(gau, non_trans.reshape(-1), texture_dims)
         per_point_shadow = (point_out / torch.clamp_min(point_non, 1e-6)).unsqueeze(-1)
-        counts, texel_ids, _, _ = _dynamic_texture_flat_ids(texture_dims, non_trans.device)
-        mean_non = torch.clamp_min(point_non / counts.to(point_non.dtype).unsqueeze(-1), 1e-6)
+        counts, texel_ids, _, _ = _cached_dynamic_texture_flat_ids(
+            gau, texture_dims, non_trans.device
+        )
+        mean_non = torch.clamp_min(
+            point_non.reshape(-1, 1) / counts.to(point_non.dtype).reshape(-1, 1),
+            1e-6,
+        )
         per_uv_confidence = torch.clamp(non_trans.reshape(-1, 1) / mean_non[texel_ids], 0.0, 1.0).reshape(-1)
     else:
         tex_res = int(getattr(gau, "texture_resolution", 1))
         per_uv_shadow = (out_trans / non_trans_safe).view(means3d.shape[0], tex_res, tex_res)
+        per_uv_shadow_rtd = per_uv_shadow
         point_out = out_trans.reshape(means3d.shape[0], -1).sum(dim=1, keepdim=True)
         point_non = non_trans.reshape(means3d.shape[0], -1).sum(dim=1, keepdim=True)
         per_point_shadow = point_out / torch.clamp_min(point_non, 1e-6)
@@ -737,6 +828,7 @@ def _compute_texture_shadow_pass(viewpoint_camera, gau, pipe, bg_color, scaling_
     return {
         "per_point_shadow": per_point_shadow,
         "per_uv_shadow": per_uv_shadow,
+        "per_uv_shadow_rtd": per_uv_shadow_rtd,
         "per_uv_confidence": per_uv_confidence,
         "light_viewmatrix": lt["world_view_transform_light"],
         "light_projmatrix": lt["light_projmatrix"],
@@ -1342,6 +1434,7 @@ def _build_render_pkg(render, shadow, other_effects, means2D, radii, allmap, tra
         "expected_depth": expected_depth,
         "depth_image": expected_depth,
         "pre_shadow": None if shadow_pkg is None else shadow_pkg["per_point_shadow"],
+        "texture_shadow_pkg": shadow_pkg,
         "render_base": render,
         "render_shadow": shadow,
         "render_other_effects": other_effects,

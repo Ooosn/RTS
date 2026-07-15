@@ -193,7 +193,7 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 30_000
+        self.iterations = 100_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -239,7 +239,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3_000
         self.densify_from_iter = 500
-        self.densify_until_iter = 100_000
+        self.densify_until_iter = 80_000
         self.densify_grad_threshold = 0.0002
         # Optional clone-only densification control. 0 keeps legacy behavior:
         # clone and split both use densify_grad_threshold.
@@ -272,7 +272,7 @@ class OptimizationParams(ParamGroup):
         self.texture_lr = 0.0025
         self.texture_specular_lr_scale = 1.0
         self.texture_normal_lr_scale = 1.0
-        self.texture_start_iter = 30_000
+        self.texture_start_iter = 0
         self.texture_clone_threshold_scale = 1.0
         self.texture_freeze_gaussian_densify = False
         self.texture_rtg_enabled = False
@@ -299,6 +299,30 @@ class OptimizationParams(ParamGroup):
         # 0 keeps the legacy per-refine-window behavior.
         self.texture_rtg_probe_interval = 0
         self.texture_rtg_required_probe_windows = 0
+        self.texture_rtd_enabled = False
+        self.texture_rtd_compress_from_iter = 85_000
+        self.texture_rtd_compress_until_iter = 95_000
+        self.texture_rtd_compress_interval = 5_000
+        self.texture_rtd_min_resolution = 1
+        self.texture_rtd_step_mode = "step"
+        self.texture_rtd_error_threshold = 0.65
+        self.texture_rtd_error_threshold_4to3 = 0.65
+        self.texture_rtd_error_threshold_3to2 = 0.45
+        self.texture_rtd_error_threshold_2to1 = 0.30
+        self.texture_rtd_kd_weight = 1.0
+        self.texture_rtd_shadow_weight = 1.0
+        self.texture_rtd_specular_weight = 1.0
+        self.texture_rtd_normal_weight = 0.0
+        self.texture_rtd_max_fraction = 0.25
+        self.texture_rtd_shadow_sample_interval = 1
+        self.texture_rtd_dry_run = False
+        self.texture_rmd_enabled = False
+        self.texture_rmd_start_iter = 110_000
+        self.texture_rmd_end_iter = 120_000
+        self.texture_rmd_weight = 1e-4
+        self.texture_rmd_kd_weight = 1.0
+        self.texture_rmd_specular_weight = 0.5
+        self.texture_rmd_target_resolution = 2
         self.texture_tor_enabled = False
         self.texture_tor_start_iter = 30_000
         self.texture_tor_gate_floor = 0.05

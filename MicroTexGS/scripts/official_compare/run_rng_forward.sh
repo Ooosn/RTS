@@ -20,21 +20,27 @@ if [[ -n "${RNG_LESS:-}" ]]; then
 fi
 RNG_HDR_ARGS=()
 RNG_BG_ARGS=()
+RNG_HDR_GAMMA_DEFAULT=0
 case "${SCENE}" in
-  LightStage/*|Synthetic/*|RenderCapture/*) RNG_HDR_ARGS+=(--hdr) ;;
+  LightStage/*|Synthetic/*|RenderCapture/*)
+    RNG_HDR_ARGS+=(--hdr)
+    RNG_HDR_GAMMA_DEFAULT=1
+    ;;
 esac
 case "${SCENE}" in
   Synthetic/*|RenderCapture/*) RNG_BG_ARGS+=(--white_background) ;;
 esac
 export OPENCV_IO_ENABLE_OPENEXR=1
-export HDR_GAMMA="${HDR_GAMMA:-1}"
+export HDR_GAMMA="${HDR_GAMMA:-${RNG_HDR_GAMMA_DEFAULT}}"
 
 if [[ "${SMOKE:-0}" == "1" ]]; then
   RNG_ITERS=20
+  RNG_DENSIFY_UNTIL="${RNG_DENSIFY_UNTIL:-20}"
   RNG_TEST_ITERS=(20)
   RNG_SAVE_ITERS=(20)
 else
   RNG_ITERS="${RNG_FORWARD_ITERS:-100000}"
+  RNG_DENSIFY_UNTIL="${RNG_DENSIFY_UNTIL:-80000}"
   RNG_TEST_ITERS=()
   RNG_SAVE_ITERS=()
   for ((iter = 10000; iter < RNG_ITERS; iter += 10000)); do
@@ -50,7 +56,7 @@ run_logged "${RNG_DIR}" "${LOG}" \
     -s "${SRC}" \
     -m "${OUT}" \
     --iterations "${RNG_ITERS}" \
-    --densify_until_iter "${RNG_ITERS}" \
+    --densify_until_iter "${RNG_DENSIFY_UNTIL}" \
     --test_iterations "${RNG_TEST_ITERS[@]}" \
     --save_iterations "${RNG_SAVE_ITERS[@]}" \
     --eval \

@@ -495,7 +495,7 @@ def texture_shadow_confidence_mode_supported(gaussians):
     }
 
 
-def collect_training_health(iteration, ll1, loss, image, shadow, other_effects, gaussians, num_points, densify_due, opacity_reset_due, shadow_stage, modelset, texture_oob_reg=None):
+def collect_training_health(iteration, ll1, loss, image, shadow, other_effects, gaussians, num_points, densify_due, opacity_reset_due, shadow_stage, modelset, texture_oob_reg=None, texture_rmd_reg=None):
     xyz_health = _grad_health(getattr(gaussians, "_xyz", None))
     scaling_health = _grad_health(getattr(gaussians, "_scaling", None))
     opacity_health = _grad_health(getattr(gaussians, "_opacity", None))
@@ -589,6 +589,22 @@ def collect_training_health(iteration, ll1, loss, image, shadow, other_effects, 
         "texture_oob_target_ratio": None if texture_oob_reg is None else float(texture_oob_reg["target_ratio"].detach().item()),
         "texture_oob_other_abs_mean": None if texture_oob_reg is None else float(texture_oob_reg["other_abs_mean"].detach().item()),
         "texture_oob_direct_abs_mean": None if texture_oob_reg is None else float(texture_oob_reg["direct_abs_mean"].detach().item()),
+        "texture_rmd_enabled": bool(getattr(gaussians, "texture_rmd_enabled", False)),
+        "texture_rmd_active": bool(texture_rmd_reg is not None),
+        "texture_rmd_total": None if texture_rmd_reg is None else float(texture_rmd_reg["total"].detach().item()),
+        "texture_rmd_raw": None if texture_rmd_reg is None else float(texture_rmd_reg["raw"].detach().item()),
+        "texture_rmd_weight": None if texture_rmd_reg is None else float(texture_rmd_reg["weight"]),
+        "texture_rmd_target_resolution": None if texture_rmd_reg is None else int(texture_rmd_reg["target_resolution"]),
+        "texture_rmd_kd": (
+            None
+            if texture_rmd_reg is None or "kd" not in texture_rmd_reg.get("components", {})
+            else float(texture_rmd_reg["components"]["kd"].detach().item())
+        ),
+        "texture_rmd_specular": (
+            None
+            if texture_rmd_reg is None or "specular" not in texture_rmd_reg.get("components", {})
+            else float(texture_rmd_reg["components"]["specular"].detach().item())
+        ),
         "texture_all_finite": bool(texture_finite),
         "all_finite": all_finite,
     }
@@ -968,10 +984,18 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
 
     """开始训练"""
     # 每次迭代，都会从视点堆栈中选择一个视点，然后渲染图像，计算损失，更新模型参数，并不是每次计算全部视点的损失
-    for iteration in range(first_iter, opt.iterations + 1):    #左闭右开区间，因此加1
+    iteration = first_iter
+    while iteration <= opt.iterations:    # Main iteration counts train-view updates only; test-view pose/light steps do not advance it.
         iter_start.record()    # 记录迭代开始的时间
+        next_step_is_test_pose = bool(
+            scene.optimizing
+            and (
+                (opt_test and viewpoint_stack)
+                or ((not viewpoint_stack) and opt_test_ready and iteration < opt.iterations)
+            )
+        )
 
-        if texture_requested and iteration > texture_start_iter and not bool(getattr(gaussians, "use_textures", False)):
+        if (not next_step_is_test_pose) and texture_requested and iteration > texture_start_iter and not bool(getattr(gaussians, "use_textures", False)):
             if not hasattr(gaussians, "enable_texture_training"):
                 raise RuntimeError("Texture warmup requires a Gaussian model with enable_texture_training().")
             if gaussians.enable_texture_training(opt):
@@ -987,10 +1011,11 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                 )
 
         # update lr of asg
-        gaussians.update_learning_rate(iteration, \
-                                        asg_freeze_step=opt.asg_lr_freeze_step, \
-                                        local_q_freeze_step=opt.local_q_lr_freeze_step, \
-                                        freeze_phasefunc_steps=opt.freeze_phasefunc_steps)
+        if not next_step_is_test_pose:
+            gaussians.update_learning_rate(iteration, \
+                                            asg_freeze_step=opt.asg_lr_freeze_step, \
+                                            local_q_freeze_step=opt.local_q_lr_freeze_step, \
+                                            freeze_phasefunc_steps=opt.freeze_phasefunc_steps)
         # opt camera or point light
         if scene.optimizing:
             scene.update_lr(iteration, \
@@ -1002,18 +1027,18 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
             
         # Every 1000 its we increase the levels of SH up to a maximum degree
         # 采取神经网络后，不再使用球谐函数，因此不再需要逐级增加球谐函数的阶数
-        if iteration % 1000 == 0:
+        if (not next_step_is_test_pose) and iteration % 1000 == 0:
             if not modelset.use_nerual_phasefunc:
                 gaussians.oneupSHdegree()
         
         # 在早期训练时，冻结 asg 参数，快速收敛
         # 但是并没有冻结 asg_sigma，为了先获得一个基础的 高光形状，并未考虑拟合复杂的高光形状
-        if iteration <= opt.asg_freeze_step:
+        if (not next_step_is_test_pose) and iteration <= opt.asg_freeze_step:
             gaussians.asg_func.asg_scales.requires_grad_(False)
             gaussians.asg_func.asg_rotation.requires_grad_(False)
         # else if iteration > opt.asg_freeze_step and asg_freezed:
         # 后续的迭代中，asg_freezed 可能已为 False，所以不需要重新设置
-        elif asg_freezed:
+        elif (not next_step_is_test_pose) and asg_freezed:
             asg_freezed = False
             gaussians.asg_func.asg_scales.requires_grad_(True)
             gaussians.asg_func.asg_rotation.requires_grad_(True)
@@ -1023,7 +1048,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
         # 如果视点堆栈为空，则根据 opt_test_ready 和 opt_test 的值，进行轮番选择训练视点和测试视点
         if not viewpoint_stack:
             # only do pose opt for test sets
-            if opt_test_ready and scene.optimizing:
+            if opt_test_ready and scene.optimizing and iteration < opt.iterations:
                 opt_test = True
                 # 重新填装测试视点堆栈
                 viewpoint_stack = scene.getTestCameras().copy()
@@ -1036,6 +1061,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
 
         # 为当前迭代选择一个视点
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        is_test_pose_step = bool(opt_test and scene.optimizing)
 
 
 
@@ -1051,6 +1077,12 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
         local_axises = gaussians.get_local_axis # (K, 3, 3)
         asg_scales = gaussians.asg_func.get_asg_lam_miu # (basis_asg_num, 2)
         asg_axises = gaussians.asg_func.get_asg_axis    # (basis_asg_num, 3, 3)
+        rtd_shadow_sample_now = bool(
+            (not next_step_is_test_pose)
+            and hasattr(gaussians, "should_sample_texture_rtd_shadow")
+            and gaussians.should_sample_texture_rtd_shadow(iteration)
+        )
+        setattr(gaussians, "_texture_rtd_collect_shadow_now", rtd_shadow_sample_now)
 
         # only opt with diffuse term at the beginning for a stable training process
         if iteration < opt.spcular_freeze_step + opt.fit_linear_step:   # 只考虑漫反射，不考虑镜面反射，刚开始训练时，先优化漫反射，赋予每个高斯点一个基础颜色
@@ -1132,6 +1164,11 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
         texture_oob_reg = compute_texture_oob_regularization(direct_image, other_effects, opt, iteration)
         if texture_oob_reg is not None:
             loss = loss + texture_oob_reg["total"]
+        texture_rmd_reg = None
+        if not (opt_test and scene.optimizing) and hasattr(gaussians, "texture_rmd_regularization"):
+            texture_rmd_reg = gaussians.texture_rmd_regularization(iteration)
+            if texture_rmd_reg is not None:
+                loss = loss + texture_rmd_reg["total"]
         
         # 反向传播，计算各个参数的梯度
         # 尚未更新参数，等待后续挑选更新
@@ -1140,6 +1177,13 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
             # RTG must read the current backward gradients before Gaussian
             # densify/prune replaces optimizer parameters and can clear grads.
             gaussians.accumulate_texture_rtg(iteration, visibility_filter=visibility_filter)
+        if not (opt_test and scene.optimizing) and hasattr(gaussians, "accumulate_texture_rtd_shadow"):
+            gaussians.accumulate_texture_rtd_shadow(
+                render_pkg.get("texture_shadow_pkg"),
+                iteration=iteration,
+                visibility_filter=visibility_filter,
+            )
+        setattr(gaussians, "_texture_rtd_collect_shadow_now", False)
         if (
             scene.optimizing
             and str(getattr(gaussians, "rasterizer", ""))[:5] == "2dgs"
@@ -1180,7 +1224,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                     )
                 )
             )
-            if health_due:
+            if (not is_test_pose_step) and health_due:
                 shadow_stage = render_pkg.get("shadow_stage", get_shadow_backward_stage(modelset, iteration))
                 health = collect_training_health(
                     iteration=iteration,
@@ -1196,6 +1240,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                     shadow_stage=shadow_stage,
                     modelset=modelset,
                     texture_oob_reg=texture_oob_reg,
+                    texture_rmd_reg=texture_rmd_reg,
                 )
                 append_jsonl(health_log_path, health)
                 if not health["all_finite"]:
@@ -1207,27 +1252,29 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                     )
 
             # Progress bar，平滑损失曲线
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 10 == 0:
+            if not is_test_pose_step:
+                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if (not is_test_pose_step) and iteration % 10 == 0:
                 num_gaussians = int(gaussians.get_xyz.shape[0])
                 progress_bar.set_postfix({
                     "Loss": f"{ema_loss_for_log:.{7}f}",
                     "Gaussians": f"{num_gaussians:,}",
                 })
                 progress_bar.update(10)
-            if iteration == opt.iterations:
+            if (not is_test_pose_step) and iteration == opt.iterations:
                 progress_bar.close()
 
             # Log and save
-            log_train_scalars = tb_writer is not None and (iteration % 10 == 0 or iteration in testing_iterations)
+            log_train_scalars = (not is_test_pose_step) and tb_writer is not None and (iteration % 10 == 0 or iteration in testing_iterations)
             elapsed_ms = iter_start.elapsed_time(iter_end) if log_train_scalars else 0.0
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed_ms, \
-                testing_iterations, scene, render, renderArgs, gamma=2.2 if modelset.hdr else 1.0, \
-                metrics_by_category = metrics_by_category, 
-                info = record_info, 
-                modelset = modelset)
-            
-            if (iteration in saving_iterations):
+            if not is_test_pose_step:
+                training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed_ms, \
+                    testing_iterations, scene, render, renderArgs, gamma=2.2 if modelset.hdr else 1.0, \
+                    metrics_by_category = metrics_by_category,
+                    info = record_info,
+                    modelset = modelset)
+
+            if (not is_test_pose_step) and (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
@@ -1481,6 +1528,24 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                             )
                     elif rtg_due:
                         print(f"\n[ITER {iteration}] RTG due but model has no refine_textures_by_rtg method")
+            if hasattr(gaussians, "compress_textures_by_rtd"):
+                rtd_compressed = gaussians.compress_textures_by_rtd(iteration)
+                rtd_log = gaussians.texture_rtd_log_string() if hasattr(gaussians, "texture_rtd_log_string") else ""
+                if rtd_log:
+                    if rtd_compressed > 0:
+                        print(f"\n[ITER {iteration}] RTD compressed {rtd_compressed} texture charts | {rtd_log}")
+                    else:
+                        print(f"\n[ITER {iteration}] RTD skipped | {rtd_log}")
+                    log_texture_architecture(
+                        texture_arch_log_path,
+                        iteration,
+                        "rtd_compress" if rtd_compressed > 0 else "rtd_skip",
+                        gaussians,
+                        modelset=modelset,
+                        pipe=pipe,
+                        opt=opt,
+                        print_summary=False,
+                    )
 
             """
             1. 默认冻结 高斯点相位函数，初期训练高斯点场景空间为主，并只简单优化漫反射 kd (阴影和次要效果为 0)
@@ -1499,7 +1564,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
             """
             # 高斯点相位函数（负责处理光照相关的相位特性（如材质、阴影、次要效果等））
             # 判断是否解冻 高斯点相位函数，解冻后该函数失效，由下列代码接管
-            if phase_func_freezed and iteration >= unfreeze_iterations: # 5000
+            if (not is_test_pose_step) and phase_func_freezed and iteration >= unfreeze_iterations: # 5000
                 gaussians.neural_phasefunc.unfreeze()
                 phase_func_freezed = False
 
@@ -1507,12 +1572,12 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
             """
             如果 图片 为 hdr 格式，则 逐渐调整 gamma 值，逐步转换到 线性空间，防止过曝，暗部细节丢失
             """
-            if iteration == opt.spcular_freeze_step: # 9000
+            if (not is_test_pose_step) and iteration == opt.spcular_freeze_step: # 9000
                 gaussians.neural_phasefunc.freeze()
                 gaussians.neural_material.requires_grad_(False)
 
             # spcular_freeze_step + fit_linear_step 之后：解冻相变函数，并开始同时优化 镜面反射 和 漫反射
-            if iteration == opt.spcular_freeze_step + opt.fit_linear_step: # 15000
+            if (not is_test_pose_step) and iteration == opt.spcular_freeze_step + opt.fit_linear_step: # 15000
                 gaussians.neural_phasefunc.unfreeze()
                 gaussians.neural_material.requires_grad_(True)
             
@@ -1529,7 +1594,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
             
 
 
-            if modelset.alpha_change and iteration == opt.asg_change_freeze:
+            if (not is_test_pose_step) and modelset.alpha_change and iteration == opt.asg_change_freeze:
                 gaussians.change_alpha_asg(gaussians.alpha_asg)
                 print("alpha changed")
 
@@ -1552,7 +1617,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                 print(viewpoint_cam.pl_adj.grad)
                 print("################################")
 
-        if (iteration in checkpoint_iterations):
+        if (not is_test_pose_step) and (iteration in checkpoint_iterations):
             if gaussians.optimizer is not None:
                 gaussians.optimizer.zero_grad(set_to_none=True)
             if scene.optimizing and getattr(scene, "optimizer", None) is not None:
@@ -1568,6 +1633,9 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
                 opt=opt,
             )
             torch.save((gaussians.capture(), iteration, scene.capture()), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+        if not is_test_pose_step:
+            iteration += 1
 
 
 def print_params(gaussians):

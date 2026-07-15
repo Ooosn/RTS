@@ -12,6 +12,8 @@
 
 import torch
 import copy
+import json
+import sys
 import math
 import cv2
 from scipy.spatial.transform import Rotation as Rot
@@ -95,6 +97,7 @@ def render_set(modelset, name, iteration, views, gaussians, pipeline, background
             _ = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, **renderArgs)
 
         torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         print("-"*10,"let's go","-"*10)
 
         start = torch.cuda.Event(enable_timing=True)
@@ -110,9 +113,28 @@ def render_set(modelset, name, iteration, views, gaussians, pipeline, background
         torch.cuda.synchronize()
         elapsed = start.elapsed_time(end)  # 毫秒
         elapsed_seconds = elapsed / (1000.0*total_frames)
+        peak_allocated_mb = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+        peak_reserved_mb = torch.cuda.max_memory_reserved() / (1024.0 * 1024.0)
         print("(oﾟ▽ﾟ)oヾ(ﾟ∀ﾟゞ)(ﾉ´▽｀)ﾉ♪(ﾉﾟ▽ﾟ)ﾉヾ(✿ﾟ▽ﾟ)ノ٩(๑❛ᴗ❛๑)۶ヾ(◍°∇°◍)ﾉﾞヾ(๑╹◡╹)ﾉ(๑*◡*๑)٩(๑>◡<๑)۶(๑╹◡╹)ﾉ(๑´ㅂ`๑)")
         print(f"Average render time: {elapsed_seconds:.4f} seconds")
         print(f"FPS: {1/elapsed_seconds:.4f}")
+        benchmark_record = {
+            "split": name,
+            "iteration": int(iteration),
+            "views": int(len(views) // epoch_num),
+            "timed_frames": int(total_frames),
+            "epochs": int(epoch_num),
+            "average_frame_ms": float(elapsed_seconds * 1000.0),
+            "fps": float(1.0 / elapsed_seconds),
+            "peak_allocated_mb": float(peak_allocated_mb),
+            "peak_reserved_mb": float(peak_reserved_mb),
+        }
+        sys.__stdout__.write(
+            "BENCHMARK_JSON "
+            + json.dumps(benchmark_record, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        )
+        sys.__stdout__.flush()
     
     else:
         # 正式渲染

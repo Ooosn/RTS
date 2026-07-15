@@ -15,6 +15,7 @@ DRY_RUN="${DRY_RUN:-0}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 VIEW_NUM="${VIEW_NUM:-2000}"
 ALIGN_TRAIN_VIEWS="${ALIGN_TRAIN_VIEWS:-1}"
+DENSIFY_UNTIL="${DENSIFY_UNTIL:-80000}"
 
 export CUDA_VISIBLE_DEVICES
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
@@ -162,20 +163,20 @@ scene_args() {
   local key="$1"
   ARGS=()
   case "${key}" in
-    LightStage/Container) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 90000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
-    LightStage/Boot) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 130000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00006) ;;
-    LightStage/Fox) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 90000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
-    LightStage/Nefertiti) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 90000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
-    NRHints/Pikachu) ARGS+=(--data_device cpu); add_transport_args 70000 90000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00015) ;;
-    NRHints/Fish) ARGS+=(--data_device cpu); add_transport_args 70000 100000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00012) ;;
-    NRHints/Cat) ARGS+=(--data_device cpu); add_transport_args 70000 90000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0002) ;;
-    NRHints/CupFabric|NRHints/Cup-Fabric) ARGS+=(--data_device cpu); add_transport_args 70000 90000; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
-    Synthetic/Hotdog) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
-    Synthetic/FurBall) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
-    Synthetic/AnisoMetal) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
+    LightStage/Container) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
+    LightStage/Boot) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00006) ;;
+    LightStage/Fox) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
+    LightStage/Nefertiti) ARGS+=(--hdr --data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
+    NRHints/Pikachu) ARGS+=(--data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00015) ;;
+    NRHints/Fish) ARGS+=(--data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00012) ;;
+    NRHints/Cat) ARGS+=(--data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0002) ;;
+    NRHints/CupFabric|NRHints/Cup-Fabric) ARGS+=(--data_device cpu); add_transport_args 70000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.0001) ;;
+    Synthetic/Hotdog) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
+    Synthetic/FurBall) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
+    Synthetic/AnisoMetal) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
     Synthetic/Drums)
       ARGS+=(--hdr --white_background)
-      add_transport_args 50000 50000
+      add_transport_args 50000 "${DENSIFY_UNTIL}"
       for i in "${!ARGS[@]}"; do
         [[ "${ARGS[$i]}" == "--asg_lr_freeze_step" ]] && ARGS[$((i + 1))]=30000
         [[ "${ARGS[$i]}" == "--asg_lr_max_steps" ]] && ARGS[$((i + 1))]=70000
@@ -183,10 +184,10 @@ scene_args() {
       done
       ARGS+=(--cam_opt --pl_opt --densify_grad_threshold 0.00013)
       ;;
-    RenderCapture/MaterialBalls) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
-    RenderCapture/Fabric) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
-    RenderCapture/Cup) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
-    RenderCapture/Tower) ARGS+=(--hdr --white_background); add_transport_args 50000 50000; ARGS+=(--cam_opt --pl_opt) ;;
+    RenderCapture/MaterialBalls) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
+    RenderCapture/Fabric) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
+    RenderCapture/Cup) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
+    RenderCapture/Tower) ARGS+=(--hdr --white_background); add_transport_args 50000 "${DENSIFY_UNTIL}"; ARGS+=(--cam_opt --pl_opt) ;;
     *) echo "Unknown scene: ${key}" >&2; return 2 ;;
   esac
 }
